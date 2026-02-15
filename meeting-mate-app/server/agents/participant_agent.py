@@ -1,17 +1,9 @@
 import json
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any
+import uuid
 
-# Vertex AI SDK
-try:
-    from vertexai.generative_models import GenerativeModel, Part as VertexPart
-except ImportError:
-    # This will be handled by VERTEX_AI_AVAILABLE from config
-    pass
-
-from models import Message
-from config import logger, VERTEX_AI_AVAILABLE, VERTEX_MODEL_NAME
-import uuid  # uuidがfallbackで使用されているためインポート
-import os  # osモジュールをインポート
+from llm_provider import llm_complete, strip_code_blocks
+from config import logger
 
 
 class ParticipantManagementAgent:
@@ -20,31 +12,31 @@ class ParticipantManagementAgent:
         logger.info(
             f"ParticipantManagementAgent initialized with config: {config_path}")
 
-    async def execute(self, instruction: str, conversation_history: List[Message], current_data: Dict[str, Any], speaker_name: str, llm_model: GenerativeModel, **kwargs) -> Tuple[Dict[str, Any], str]:
+    async def execute(self, instruction: str, conversation_history: List[Any], current_data: Dict[str, Any], speaker_name: str, model_name: str, api_key: str, **kwargs) -> Tuple[Dict[str, Any], str]:
         return await handle_participant_management_request(
             instruction=instruction,
             conversation_history=conversation_history,
             current_data=current_data,
             speaker_name=speaker_name,
-            llm_model=llm_model
+            model_name=model_name,
+            api_key=api_key
         )
 
 
 async def handle_participant_management_request(
     instruction: str,
-    conversation_history: List[Message],
+    conversation_history: List[Any],
     current_data: Dict[str, Any],
     speaker_name: str,
-    llm_model: GenerativeModel
+    model_name: str,
+    api_key: str
 ) -> Tuple[Dict[str, Any], str]:
     session_data = current_data
-    # Participants are now an object, not a list
     current_participants_obj = session_data.get("participants", {})
-    if not isinstance(current_participants_obj, dict):  # リストで来てしまった場合のフォールバック
+    if not isinstance(current_participants_obj, dict):
         logger.warning(
             f"Participants data is not a dict, attempting to convert: {current_participants_obj}")
-        if isinstance(current_participants_obj, list) and all(isinstance(p, dict) and "name" in p for p in current_participants_obj):  # IDがない古いリスト形式を想定
-            # 簡単なIDを生成して辞書に変換（LLMに任せる方が良いが、フォールバックとして）
+        if isinstance(current_participants_obj, list) and all(isinstance(p, dict) and "name" in p for p in current_participants_obj):
             temp_obj = {}
             for i, p_item in enumerate(current_participants_obj):
                 p_id = f"participant_fallback_{i}"
@@ -54,26 +46,22 @@ async def handle_participant_management_request(
         else:
             current_participants_obj = {}
 
-    if not VERTEX_AI_AVAILABLE or llm_model is None:
-        logger.warning(
-            "ParticipantAgent: Fallback logic not fully adapted for new object structure. LLM recommended.")
+    if not model_name or not api_key:
+        logger.warning("LLM not configured for participant management.")
         if speaker_name and not any(p.get("name") == speaker_name for p in current_participants_obj.values()):
             fallback_id = f"participant_{speaker_name.lower().replace(' ', '_')}_{uuid.uuid4().hex[:4]}"
             current_participants_obj[fallback_id] = {
                 "name": speaker_name, "role": "参加者"}
-            return {"participants": current_participants_obj}, f"Participant '{speaker_name}' added (Vertex AI unavailable or LLM model not provided)."
-        return {"participants": current_participants_obj}, "Participants update skipped (Vertex AI unavailable or no new speaker)."
+            return {"participants": current_participants_obj}, f"Participant '{speaker_name}' added (LLM not configured)."
+        return {"participants": current_participants_obj}, "Participants update skipped (LLM not configured)."
 
     try:
-        model = llm_model  # 引数で受け取ったllm_modelを使用
-
         history_str = "\n".join(
             [f"{msg.role.capitalize()}: {msg.parts[0]['text']}" for msg in conversation_history if msg.parts and msg.parts[0].get('text')])
 
         session_data_json_str = json.dumps(
             session_data, ensure_ascii=False, indent=2)
 
-        # Check if representative mode is enabled
         representative_mode = session_data.get("representativeMode", False)
         representative_mode_context = ""
         if representative_mode:
@@ -99,7 +87,7 @@ async def handle_participant_management_request(
 **指示の解釈と処理:**
 - 新しい参加者を追加する場合: `speaker_name` さんが指示した名前で新しい参加者エントリを作成してください。IDは `participant_` + 名前（英小文字など） + `_` + 短いユニーク文字列などで生成してください。
 - 既存の参加者の情報を変更する場合: 指示内容に基づいて、該当する参加者の `name` や `role` を更新してください。IDは変更しないでください。
-- `speaker_name` さん自身の情報を変更する場合: `participants` オブジェクト内で `speaker_name` さんに該当するエントリ（もしあれば）の情報を更新してください。もし `speaker_name` さんがまだリストにいない場合は、新しいエントリとして追加してください。その際、IDは `participant_{speaker_name}_id` のように生成し、名前は `{speaker_name}` としてください。
+- `speaker_name` さん自身の情報を変更する場合: `participants` オブジェクト内で `speaker_name` さんに該当するエントリ（もしあれば）の情報を更新してください。もし `speaker_name` さんがまだリストにいない場合は、新しいエントリとして追加してください。
 - 重複は避けてください（同じ `name` の参加者が複数存在しないように、IDで区別します）。
 - もし指示内容が参加者情報の変更を意図していない場合は、現在の `participants` オブジェクトをそのまま返してください。
 
@@ -132,32 +120,18 @@ async def handle_participant_management_request(
 更新後の参加者オブジェクト (JSON):"""
         logger.info(
             f"Sending participant update prompt to LLM. Instruction: {instruction}, Speaker: {speaker_name}")
-        response = await model.generate_content_async(prompt)
-
-        llm_response_text = ""
-        if response.candidates and response.candidates[0].content.parts:
-            llm_response_text = response.candidates[0].content.parts[0].text
-        elif hasattr(response, 'text') and response.text:
-            llm_response_text = response.text
+        llm_response_text = await llm_complete(model=model_name, prompt=prompt, api_key=api_key)
 
         logger.info(f"LLM participant response: {llm_response_text}")
         if not llm_response_text:
             return {"participants": current_participants_obj}, "LLM returned empty participant update."
 
-        cleaned_response_text = llm_response_text.strip()
-        if cleaned_response_text.startswith("```json"):
-            cleaned_response_text = cleaned_response_text[7:-3].strip()
-        elif cleaned_response_text.startswith("```"):
-            cleaned_response_text = cleaned_response_text[3:-3].strip()
-        elif cleaned_response_text.startswith("`") and cleaned_response_text.endswith("`"):
-            cleaned_response_text = cleaned_response_text[1:-1].strip()
+        cleaned_response_text = strip_code_blocks(llm_response_text)
 
         updated_participants_obj = json.loads(cleaned_response_text)
-        if not isinstance(updated_participants_obj, dict):  # Expecting an object now
-            raise ValueError(
-                "LLM participant response not an object.")
+        if not isinstance(updated_participants_obj, dict):
+            raise ValueError("LLM participant response not an object.")
 
-        # Validate schema of each participant object within the main object
         valid_participants_obj = {}
         for p_id, p_info in updated_participants_obj.items():
             if isinstance(p_info, dict) and "name" in p_info and "role" in p_info:

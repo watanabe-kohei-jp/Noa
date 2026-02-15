@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback, Fragment } from 'react';
-import { Users, MessageSquare, Clock, LogOut, X, User, Send, Sun, Moon, Palette, Mic, Plus, Eye} from 'lucide-react';
+import { Users, MessageSquare, Clock, LogOut, X, User, Send, Sun, Moon, Palette, Mic, Plus, Eye, Volume2, VolumeX} from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import Link from 'next/link';
@@ -8,6 +8,8 @@ import Link from 'next/link';
 // カスタムフックのインポート
 import { useRoomData } from '@/hooks/useRoomData';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
+import { useBackendSTT } from '@/hooks/useBackendSTT';
+import { useBackendTTS } from '@/hooks/useBackendTTS';
 import { useBackendApi } from '@/hooks/useBackendApi';
 import { useFlashMessages } from '@/hooks/useFlashMessages';
 
@@ -62,6 +64,7 @@ export default function RoomPage() {
   const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'modern'>('light'); // デフォルトはライトテーマ
   const [modalContent, setModalContent] = useState<{ title: string; children: React.ReactNode; panelId?: PanelId } | null>(null);
   const [processingAgents, setProcessingAgents] = useState<string[]>([]); // 処理中のエージェント名
+  const [sttMode, setSttMode] = useState<'browser' | 'backend'>('browser'); // STT モード
 
   // クライアントサイドでroomIdを取得
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -259,6 +262,36 @@ export default function RoomPage() {
       console.log('Speech recognition ended');
     },
   });
+
+  // バックエンドSTT
+  const {
+    isRecording: isBackendRecording,
+    isAvailable: isBackendSTTAvailable,
+    toggleRecording: toggleBackendRecording,
+  } = useBackendSTT({
+    roomId: currentRoomId,
+    language: 'ja',
+    onResult: handleSpeechResult,
+    onError: (error) => {
+      console.error('Backend STT error:', error);
+    },
+  });
+
+  // バックエンドTTS
+  const {
+    isSpeaking,
+    isAvailable: isTTSAvailable,
+    speak: speakTTS,
+    stop: stopTTS,
+  } = useBackendTTS({
+    roomId: currentRoomId,
+    language: 'ja',
+  });
+
+  // 統合されたSTT状態
+  const isCurrentlyRecording = sttMode === 'browser' ? isRecording : isBackendRecording;
+  const isSTTAvailable = sttMode === 'browser' ? isSpeechApiAvailable : isBackendSTTAvailable;
+  const handleToggleRecording = sttMode === 'browser' ? toggleSpeechRecognition : toggleBackendRecording;
 
   // Pinterest風レイアウト用の状態
   const [cols, setCols] = useState<PanelId[][]>([
@@ -1029,9 +1062,42 @@ export default function RoomPage() {
 
             {/* Action Buttons */}
             <div className="flex items-center space-x-2">
-              <button onClick={() => toggleSpeechRecognition()} className={`p-3 rounded-xl transition-all ${isRecording ? 'bg-red-500 text-white animate-pulse' : `${selectedTheme.button.secondary} text-white`}`} disabled={!isSpeechApiAvailable}>
+              {/* STT モード切替 */}
+              <button
+                onClick={() => setSttMode(prev => prev === 'browser' ? 'backend' : 'browser')}
+                className={`px-2 py-1 rounded-lg text-xs transition-all border ${
+                  sttMode === 'backend'
+                    ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
+                    : `${selectedTheme.cardInner} ${selectedTheme.text.secondary}`
+                }`}
+                title={sttMode === 'browser' ? 'ブラウザSTT (切替)' : 'バックエンドSTT (切替)'}
+              >
+                {sttMode === 'browser' ? 'STT:Br' : 'STT:API'}
+              </button>
+              {/* マイクボタン */}
+              <button onClick={() => handleToggleRecording()} className={`p-3 rounded-xl transition-all ${isCurrentlyRecording ? 'bg-red-500 text-white animate-pulse' : `${selectedTheme.button.secondary} text-white`}`} disabled={!isSTTAvailable}>
                 <Mic className="w-5 h-5" />
               </button>
+              {/* TTS再生/停止ボタン */}
+              {isTTSAvailable && (
+                <button
+                  onClick={() => {
+                    if (isSpeaking) {
+                      stopTTS();
+                    } else {
+                      // 最新のAIレスポンスを読み上げ
+                      const lastAiMessage = [...chatHistory].reverse().find(c => c.type === 'system');
+                      if (lastAiMessage) {
+                        speakTTS(lastAiMessage.message);
+                      }
+                    }
+                  }}
+                  className={`p-3 rounded-xl transition-all ${isSpeaking ? 'bg-orange-500 text-white animate-pulse' : `${selectedTheme.button.secondary} text-white`}`}
+                  title={isSpeaking ? '読み上げ停止' : '最新AI応答を読み上げ'}
+                >
+                  {isSpeaking ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                </button>
+              )}
               <button ref={messageSquareButtonRef} onClick={() => setIsChatVisible(!isChatVisible)} className={`relative p-3 rounded-xl transition-colors border ${selectedTheme.cardInner}`}>
                 <MessageSquare className="w-5 h-5" />
                 {unreadMessageCount > 0 && (

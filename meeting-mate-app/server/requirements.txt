@@ -1,6 +1,11 @@
 fastapi
 uvicorn
 python-dotenv
-google-cloud-aiplatform
 firebase-admin
 pydantic
+litellm
+openai
+anthropic
+cryptography
+python-multipart
+aiohttp

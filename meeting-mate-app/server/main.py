@@ -1,44 +1,36 @@
 # Enable forward references for type hints
 from __future__ import annotations
 
-# Vertex AI設定をインポート
-from config import VERTEX_AI_AVAILABLE, VERTEX_MODEL_NAME, LLM_TRIGGER_MESSAGE_COUNT
+# マルチプロバイダー LLM 設定
+from config import (
+    DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT,
+    AGENT_CONFIG_DIR, MAX_ITERATIONS, MAX_RETRY_ATTEMPTS,
+    get_default_api_key, logger as config_logger
+)
+from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
 from file_utils import load_json, save_json, ensure_dir_exists
-from config import AGENT_CONFIG_DIR, MAX_ITERATIONS, MAX_RETRY_ATTEMPTS
 from firebase_admin import credentials, auth as firebase_auth, db
 import firebase_admin
 import os
 import json
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, validator
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import logging
 from datetime import datetime, timedelta
-from api_key_manager import FirebaseAPIKeyManager  # 追加
-import asyncio  # 追加
-
-# Import types only for type checking
-if TYPE_CHECKING:
-    from vertexai.generative_models import GenerativeModel
+from api_key_manager import FirebaseAPIKeyManager
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-if VERTEX_AI_AVAILABLE:
-    try:
-        import vertexai
-        from vertexai.generative_models import GenerativeModel
-        logger.info("Vertex AI module imported successfully.")
-    except Exception as e:
-        logger.error(f"Failed to import Vertex AI module: {e}")
-        VERTEX_AI_AVAILABLE = False
 
 load_dotenv()
 
@@ -74,9 +66,10 @@ participant_agent = ParticipantManagementAgent(
 task_agent = TaskManagementAgent(config_path=os.path.join(
     AGENT_CONFIG_DIR, "task_agent_config.json"))
 
-api_key_manager = FirebaseAPIKeyManager()  # 追加
+api_key_manager = FirebaseAPIKeyManager()
 
 ALLOWED_DEMO_ROOM = "demo_zenn"
+
 
 def verify_demo_room_access(room_id: str):
     """デモ版のルーム制限をチェック"""
@@ -86,8 +79,10 @@ def verify_demo_room_access(room_id: str):
             detail=f"Demo version: Only '{ALLOWED_DEMO_ROOM}' room is accessible"
         )
 
-# LLMとのやり取りやフロントエンドからの入力に使用するPydanticモデル
 
+# ================================================================
+# Pydantic Models
+# ================================================================
 
 class LLMMessage(BaseModel):
     role: str
@@ -110,25 +105,22 @@ class LLMMessage(BaseModel):
             return validated_parts
         return v
 
-# DB保存用トランスクリプトエントリのPydanticモデル (ユーザー提案スキーマベース)
-
 
 class DBTranscriptEntry(BaseModel):
     text: str
-    userId: str  # ユーザーのUID
-    userName: Optional[str] = None  # ユーザーの表示名 (displayName)
-    timestamp: str  # ISO format string
-    role: Optional[str] = None  # 'user' or 'ai'
+    userId: str
+    userName: Optional[str] = None
+    timestamp: str
+    role: Optional[str] = None
 
 
 class TaskPayload(BaseModel):
     taskId: str
-    messages: List[LLMMessage]  # フロントエンドからは最新のメッセージ1件 (LLMMessage形式)
+    messages: List[LLMMessage]
     roomId: Optional[str] = "default_room"
-    speakerId: str  # 発言者のUID
-    speakerName: Optional[str] = "Unknown Speaker"  # 発言者の表示名
-    llmApiKey: Optional[str] = None  # LLM APIキーを追加
-    # ... (他のフィールドは変更なし)
+    speakerId: str
+    speakerName: Optional[str] = "Unknown Speaker"
+    llmApiKey: Optional[str] = None
     currentParticipants: Optional[List[Dict[str, Any]]] = None
     currentTasks: Optional[List[Dict[str, Any]]] = None
     currentNotes: Optional[List[Dict[str, Any]]] = None
@@ -146,7 +138,6 @@ class JsonRpcRequest(BaseModel):
 
 class AgentResult(BaseModel):
     invokedAgents: List[str] = []
-    # ... (他のフィールドは変更なし)
     updatedParticipants: Optional[List[Dict[str, Any]]] = None
     updatedTasks: Optional[List[Dict[str, Any]]] = None
     updatedNotes: Optional[List[Dict[str, Any]]] = None
@@ -160,13 +151,11 @@ class JsonRpcResponse(BaseModel):
     error: Optional[Dict[str, Any]] = None
     id: str
 
-# ... (JoinRoomRequest, join_room_endpoint は変更なし)
-
 
 class JoinRoomRequest(BaseModel):
     idToken: str
     roomId: str
-    speakerName: Optional[str] = "Unknown User"  # 参加者の表示名を追加
+    speakerName: Optional[str] = "Unknown User"
 
 
 class AddMessageRequest(BaseModel):
@@ -175,6 +164,10 @@ class AddMessageRequest(BaseModel):
     message: str
     speakerName: Optional[str] = "Unknown User"
 
+
+# ================================================================
+# Endpoints: join_room, add_message
+# ================================================================
 
 @app.post("/join_room", summary="Request to join a meeting room")
 async def join_room_endpoint(request_data: JoinRoomRequest):
@@ -190,14 +183,12 @@ async def join_room_endpoint(request_data: JoinRoomRequest):
         if not room_data:
             raise HTTPException(status_code=404, detail="Room not found.")
 
-        # 既にルームの参加者であるか確認
         if room_data.get("participants", {}).get(uid):
             return {"status": "success", "message": "User is already a participant in this room."}
 
-        # 参加者として追加
         participant_data = {
             "name": display_name,
-            "role": "Participant",  # 新規参加者はParticipantとする
+            "role": "Participant",
             "joinedAt": datetime.utcnow().isoformat() + "Z"
         }
         room_ref.child(f"participants/{uid}").set(participant_data)
@@ -260,9 +251,34 @@ async def add_message_endpoint(request_data: AddMessageRequest):
             status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
-async def process_single_agent(agent, task_payload: TaskPayload, agent_name: str, instruction_text: str, results_dict: dict, conversation_history_for_agent: List[LLMMessage], llm_model_instance: GenerativeModel):
+# ================================================================
+# Agent orchestration (マルチプロバイダー対応)
+# ================================================================
+
+def _resolve_api_keys(room_id: str, room_config: dict, agent_models: dict, default_model: str) -> Dict[str, str]:
+    """必要な全プロバイダーのAPIキーを解決する"""
+    # 必要なプロバイダーを収集
+    all_models = list(agent_models.values()) + [default_model]
+    providers_needed = set(detect_provider(m) for m in all_models if m)
+
+    api_keys = {}
+    for provider in providers_needed:
+        key = api_key_manager.get_provider_api_key(room_id, provider)
+        if not key:
+            key = get_default_api_key(provider)
+        if key:
+            api_keys[provider] = key
+    return api_keys
+
+
+async def process_single_agent(
+    agent, task_payload: TaskPayload, agent_name: str, instruction_text: str,
+    results_dict: dict, conversation_history_for_agent: List[LLMMessage],
+    model_name: str, api_key: str
+):
     logger.info(
-        f"Invoking {agent_name} for task {task_payload.taskId} in room {task_payload.roomId} with instruction: '{instruction_text}'")
+        f"Invoking {agent_name} for task {task_payload.taskId} in room {task_payload.roomId} "
+        f"with model={model_name}, instruction: '{instruction_text}'")
     try:
         if hasattr(agent, 'execute'):
             room_ref_path = f"rooms/{task_payload.roomId}"
@@ -288,9 +304,10 @@ async def process_single_agent(agent, task_payload: TaskPayload, agent_name: str
                 "conversation_history": conversation_history_for_agent,
                 "current_data": current_data_for_agent,
                 "room_id": task_payload.roomId,
-                "speaker_id": task_payload.speakerId,  # speakerIdを追加
+                "speaker_id": task_payload.speakerId,
                 "speaker_name": task_payload.speakerName,
-                "llm_model": llm_model_instance  # LLMモデルインスタンスを渡す
+                "model_name": model_name,
+                "api_key": api_key,
             }
             updated_data_from_agent, user_message_text = await agent.execute(**agent_specific_args)
 
@@ -320,146 +337,50 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
     logger.info(
         f"Orchestrating agents for task: {task_payload.taskId}, room: {task_payload.roomId}")
 
-    if not VERTEX_AI_AVAILABLE:
+    # ルーム設定を取得
+    room_config = api_key_manager.get_room_config(task_payload.roomId)
+    agent_models = room_config.get("agent_models", {})
+    default_model = room_config.get("default_model", "") or DEFAULT_LLM_MODEL
+
+    # APIキーを解決
+    api_keys = _resolve_api_keys(task_payload.roomId, room_config, agent_models, default_model)
+
+    # 旧API互換: llm_api_key 引数がある場合、Geminiキーとして使用
+    if llm_api_key and "gemini" not in api_keys:
+        api_keys["gemini"] = llm_api_key
+
+    # オーケストレーターのモデルとキーを決定
+    orchestrator_model = agent_models.get("orchestrator", default_model)
+    orchestrator_provider = detect_provider(orchestrator_model)
+    orchestrator_key = api_keys.get(orchestrator_provider)
+
+    if not orchestrator_key:
+        logger.error(f"No API key for orchestrator provider: {orchestrator_provider}")
         raise HTTPException(
-            status_code=503, detail="Vertex AI is not available.")
-
-    current_llm_model: Optional[GenerativeModel] = None
-
-    try:
-        from config import PROJECT_ID, REGION
-        if not PROJECT_ID or not REGION:
-            logger.error(
-                "PROJECT_ID or REGION not set in config. Cannot initialize Vertex AI.")
-            raise HTTPException(
-                status_code=503, detail="LLM service unavailable: Server configuration error (PROJECT_ID/REGION missing).")
-
-        # FirebaseからAPIキーを取得
-        retrieved_llm_api_key = None
-        try:
-            retrieved_llm_api_key = api_key_manager.get_room_api_key(task_payload.roomId)
-        except Exception as e:
-            logger.error(f"Error retrieving API key: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=503, detail=f"LLM service unavailable: Error retrieving API key: {str(e)}")
-        
-        # 環境変数からデフォルトのAPIキーを取得
-        default_api_key = os.environ.get('DEFAULT_VERTEX_API_KEY')
-        
-        # APIキーの優先順位: 1. Firebaseから取得したキー 2. 環境変数のデフォルトキー 3. 引数で渡されたキー
-        final_api_key = retrieved_llm_api_key or default_api_key or llm_api_key
-        
-        if not final_api_key:
-            logger.error(f"No LLM API key found for room {task_payload.roomId}.")
-            raise HTTPException(
-                status_code=503, detail="LLM service unavailable: No API key available for this room.")
-
-        # Vertex AIを初期化
-        try:
-            vertexai.init(project=PROJECT_ID, location=REGION,
-                          api_key=final_api_key)
-            logger.info("Vertex AI initialized with API key.")
-        except ValueError as ve:
-            if "already been initialized" in str(ve):
-                logger.warning(
-                    "Vertex AI already initialized. Attempting to use existing initialization.")
-            else:
-                raise ve
-        except Exception as e:
-            logger.error(
-                f"Failed to initialize Vertex AI: {e}", exc_info=True)
-            # Check if the error is related to API key authentication
-            error_str = str(e).lower()
-            if any(keyword in error_str for keyword in ['api key', 'authentication', 'credentials', 'unauthorized', 'forbidden', 'invalid key']):
-                raise HTTPException(
-                    status_code=503, detail=f"LLM service unavailable: Invalid or expired Gemini API key. Please check your API key configuration.")
-            else:
-                raise HTTPException(
-                    status_code=503, detail=f"LLM service unavailable: Failed to initialize Vertex AI: {e}")
-
-        # LLMモデルの選択ロジック
-        llm_models_from_secrets = db.reference(
-            f"room_secrets/{task_payload.roomId}/llm_models").get()
-
-        selected_llm_model_name = VERTEX_MODEL_NAME  # デフォルトモデル
-
-        if llm_models_from_secrets and isinstance(llm_models_from_secrets, list) and len(llm_models_from_secrets) > 0:
-            # 最初の利用可能なモデルを選択
-            selected_llm_model_name = llm_models_from_secrets[0]
-            logger.info(
-                f"Using LLM model from room_secrets: {selected_llm_model_name}")
-        else:
-            logger.info(
-                f"No specific LLM model found in room_secrets for room {task_payload.roomId}. Using default: {selected_llm_model_name}")
-
-        # GenerativeModelをインスタンス化
-        try:
-            current_llm_model = GenerativeModel(selected_llm_model_name)
-            logger.info(
-                f"Vertex AI model '{selected_llm_model_name}' instantiated.")
-        except Exception as e:
-            logger.error(
-                f"Failed to instantiate Vertex AI model: {e}", exc_info=True)
-            # Check if the error is related to API key authentication during model instantiation
-            error_str = str(e).lower()
-            if any(keyword in error_str for keyword in ['api key', 'authentication', 'credentials', 'unauthorized', 'forbidden', 'invalid key']):
-                raise HTTPException(
-                    status_code=503, detail=f"LLM service unavailable: Invalid or expired Gemini API key. Please check your API key configuration.")
-            else:
-                raise HTTPException(
-                    status_code=503, detail=f"LLM service unavailable: Failed to instantiate Vertex AI model '{selected_llm_model_name}': {e}")
-
-    except Exception as e:
-        logger.error(
-            f"Failed to initialize or instantiate Vertex AI: {e}", exc_info=True)
-        # Check if the error is related to API key authentication
-        error_str = str(e).lower()
-        if any(keyword in error_str for keyword in ['api key', 'authentication', 'credentials', 'unauthorized', 'forbidden', 'invalid key']):
-            raise HTTPException(
-                status_code=503, detail=f"LLM service unavailable: Invalid or expired Gemini API key. Please check your API key configuration.")
-        else:
-            raise HTTPException(
-                status_code=503, detail=f"LLM service unavailable or failed to initialize: {e}")
-    finally:
-        pass
-
-    if current_llm_model is None:
-        raise HTTPException(
-            status_code=503, detail="LLM service unavailable or failed to initialize.")
+            status_code=503, detail=f"LLM service unavailable: No API key for provider '{orchestrator_provider}'.")
 
     room_ref_path = f"rooms/{task_payload.roomId}"
 
-    # DBから読み込んだ新スキーマのトランスクリプトをLLM用のLLMMessage形式に変換
+    # DBから読み込んだトランスクリプトをLLM用のLLMMessage形式に変換
     llm_transcript_messages: List[LLMMessage] = []
     for entry_dict in db_transcript_entries:
         try:
-            # DBスキーマからLLMMessageへの変換ロジック
             text = entry_dict.get("text", "[内容なし]")
-            # userNameを優先し、なければuserIdを使用
-            speaker_name_for_llm = entry_dict.get(
-                "userName") or ""  # userNameがなければ空文字列
+            speaker_name_for_llm = entry_dict.get("userName") or ""
 
-            # roleフィールドに応じてLLMMessageのroleを決定
             entry_role = (entry_dict.get("role") or "").lower()
             if entry_role == "user":
                 llm_role = "user"
             elif entry_role == "ai":
-                llm_role = "model"  # Vertex AI互換
+                llm_role = "model"
             else:
-                # roleが未設定またはunknownの場合はuserとして扱う（参加者の発言）
                 llm_role = "user"
 
-            if not speaker_name_for_llm:
-                logger.warning(
-                    f"Transcript entry missing 'userName' field: {entry_dict}. Using empty string for speaker name.")
-
             llm_transcript_messages.append(
-                # 発言者名もメッセージに含める
                 LLMMessage(role=llm_role, parts=[{"text": f"{speaker_name_for_llm}: {text}"}]))
         except Exception as e:
             logger.error(
                 f"Error converting DB transcript entry to LLMMessage: {entry_dict}, Error: {e}", exc_info=True)
-            # エラー時はスキップするか、エラーを示すメッセージを追加するか
             llm_transcript_messages.append(LLMMessage(
                 role="user", parts=[{"text": "[変換エラー]"}]))
 
@@ -484,11 +405,6 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
     history_str = "\n".join(history_parts)
     logger.info(
         f"Latest user prompt for dispatch: '{user_prompt}' by {task_payload.speakerName}")
-    logger.debug(f"History for LLM: \n{history_str}")
-
-    available_agents = ["TaskManagementAgent", "NotesGeneratorAgent",
-                        "AgendaManagementAgent", "OverviewDiagramAgent"]
-    available_agents_str = ", ".join(available_agents)
 
     # Check if representative mode is enabled
     representative_mode = session_data_for_llm_context.get("representativeMode", False)
@@ -517,17 +433,9 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
   ...
 ]`
 - `agent_name` には、必ず上記リスト内のエージェント名を指定してください。
-- `instruction` には、そのエージェントに実行させたい具体的な指示を、簡潔な日本語の文字列で記述してください。複雑な構造化データは含めないでください。
+- `instruction` には、そのエージェントに実行させたい具体的な指示を、簡潔な日本語の文字列で記述してください。
 - 複数のエージェントを呼び出す必要がある場合は、リスト内に複数のオブジェクトを含めてください。
 - 呼び出すべき適切なエージェントが存在しない場合は、空のリスト `[]` を返してください。
-
-具体例:
-- タスク管理エージェントに新しいタスクを登録する場合:
-  `[ {{"agent_name": "TaskManagementAgent", "instruction": "新しいタスク「API仕様書の作成」を登録してください"}} ]`
-- アジェンダ管理エージェントに現在のアジェンダを更新する場合:
-  `[ {{"agent_name": "AgendaManagementAgent", "instruction": "現在のアジェンダのメイントピックを「次期プロジェクトの計画」に変更してください"}} ]`
-- 該当するエージェントがない場合:
-  `[]`
 
 現在のセッションデータ:
 ```json
@@ -539,32 +447,26 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 
 上記を踏まえ、会話履歴全体を考慮しつつ、特に最新の{LLM_TRIGGER_MESSAGE_COUNT}発言に注目して、呼び出すべきエージェントと指示をJSONリスト形式で出力してください。基本的には3つ以上のエージェントが関係する場合が多いはずです。:"""
 
-    # プロンプトをログに出力
-    logger.info(f"Prompt sent to Orchestrator LLM:\n{dispatch_prompt_template}")
+    logger.info(f"Prompt sent to Orchestrator LLM (model={orchestrator_model})")
 
-    llm_response = await current_llm_model.generate_content_async(dispatch_prompt_template)
-    # ... (LLM応答パースとエージェント起動のロジックは前回の修正を流用)
-    llm_dispatch_decision_text = getattr(llm_response, 'text', "")
-    if not llm_dispatch_decision_text and getattr(llm_response, 'candidates', None) and llm_response.candidates[0].content.parts:
-        llm_dispatch_decision_text = llm_response.candidates[0].content.parts[0].text
-    # 生の応答テキストをログに出力
-    logger.info(
-        f"Raw Orchestrator LLM response text: {llm_dispatch_decision_text}")
+    # オーケストレーターLLM呼び出し (litellm経由)
+    llm_dispatch_decision_text = await llm_complete(
+        model=orchestrator_model,
+        prompt=dispatch_prompt_template,
+        api_key=orchestrator_key
+    )
 
-    if llm_dispatch_decision_text.strip().startswith("```json"):
-        llm_dispatch_decision_text = llm_dispatch_decision_text.strip()[
-            7:-3].strip()
-    elif llm_dispatch_decision_text.strip().startswith("```"):
-        llm_dispatch_decision_text = llm_dispatch_decision_text.strip()[
-            3:-3].strip()
+    logger.info(f"Raw Orchestrator LLM response text: {llm_dispatch_decision_text}")
+
+    # レスポンスパース
+    cleaned_dispatch = strip_code_blocks(llm_dispatch_decision_text)
     try:
-        dispatch_actions = json.loads(
-            llm_dispatch_decision_text) if llm_dispatch_decision_text else []
+        dispatch_actions = json.loads(cleaned_dispatch) if cleaned_dispatch else []
         if not isinstance(dispatch_actions, list):
             dispatch_actions = []
     except json.JSONDecodeError:
         logger.error(
-            f"Failed to parse orchestrator LLM response: {llm_dispatch_decision_text}.")
+            f"Failed to parse orchestrator LLM response: {cleaned_dispatch}.")
         dispatch_actions = []
 
     all_agents_map = {
@@ -573,27 +475,34 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
     }
     results_from_agents = {}
     active_agent_names = []
-    agent_instructions_map = {}  # エージェントへの指示を保存する辞書
+    agent_instructions_map = {}
 
-    agent_tasks = []  # エージェントタスクを保持するリスト
+    agent_tasks = []
 
     for action in dispatch_actions:
         agent_name = action.get("agent_name")
         instruction = action.get("instruction")
         if instruction is None:
             logger.warning(
-                f"Action for agent '{agent_name}' missing 'instruction'. Using user_prompt. Action: {action}")
+                f"Action for agent '{agent_name}' missing 'instruction'. Using user_prompt.")
             instruction = user_prompt
         if not agent_name or not isinstance(agent_name, str):
-            logger.warning(
-                f"Invalid agent_name in action: {action}. Skipping.")
+            logger.warning(f"Invalid agent_name in action: {action}. Skipping.")
             continue
         agent_instance = all_agents_map.get(agent_name)
         if agent_instance:
+            # エージェント別モデル・APIキー解決
+            agent_model = agent_models.get(agent_name, default_model)
+            agent_provider = detect_provider(agent_model)
+            agent_key = api_keys.get(agent_provider)
+
+            if not agent_key:
+                logger.error(f"No API key for agent {agent_name} (provider: {agent_provider}). Skipping.")
+                continue
+
             logger.info(
-                f"Scheduling agent: {agent_name} with instruction: '{instruction}'")
-            agent_instructions_map[agent_name] = instruction  # 指示を保存
-            # 正しいasyncio.create_taskの使い方
+                f"Scheduling agent: {agent_name} with model={agent_model}, instruction: '{instruction}'")
+            agent_instructions_map[agent_name] = instruction
             task = asyncio.create_task(
                 process_single_agent(
                     agent_instance,
@@ -602,7 +511,8 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
                     instruction,
                     results_from_agents,
                     llm_transcript_messages,
-                    current_llm_model
+                    model_name=agent_model,
+                    api_key=agent_key
                 )
             )
             agent_tasks.append(task)
@@ -611,29 +521,21 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             logger.warning(
                 f"Agent '{agent_name}' not found. Skipping action: {action}")
 
-    # すべてのエージェントタスクが完了するのを待つ
     if agent_tasks:
         await asyncio.gather(*agent_tasks)
 
     # エージェントへの指示をトランスクリプトに追記
-    # 安全にトランスクリプトを更新するため、最新のデータを取得して更新する
     transcript_ref = db.reference(f"{room_ref_path}/transcript")
-    
-    # 最新のトランスクリプトを取得
-    current_transcript_list = transcript_ref.get()
-    if current_transcript_list is None or not isinstance(current_transcript_list, list):
-        current_transcript_list = []
 
-    # エージェント名とアイコン・短縮名の対応関係
     agent_display_config = {
         "TaskManagementAgent": {"icon": "🗂️", "short_name": "Task"},
         "NotesGeneratorAgent": {"icon": "📝", "short_name": "Notes"},
         "AgendaManagementAgent": {"icon": "📋", "short_name": "Agenda"},
         "OverviewDiagramAgent": {"icon": "🗺️", "short_name": "Diagram"}
     }
-    
+
     ai_messages_to_append = []
-    for agent_name in active_agent_names:  # 実際に呼び出されたエージェントのみを対象
+    for agent_name in active_agent_names:
         instruction_text = agent_instructions_map.get(agent_name)
         if instruction_text:
             config = agent_display_config.get(agent_name, {"icon": "🤖", "short_name": agent_name})
@@ -644,31 +546,22 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         ai_message_text = "\n".join(ai_messages_to_append)
         new_ai_entry = DBTranscriptEntry(
             text=ai_message_text,
-            userId="ai",  # AIの識別子
-            userName="AI",  # AIの表示名
+            userId="ai",
+            userName="AI",
             timestamp=datetime.utcnow().isoformat() + "Z",
-            role="ai"  # ロールを'ai'に設定
+            role="ai"
         )
-        
-        # トランスクリプトの更新を試みる（競合状態を避けるため）
+
         try:
-            # 最新のトランスクリプトを再取得して更新
             latest_transcript = transcript_ref.get() or []
             if not isinstance(latest_transcript, list):
                 latest_transcript = []
-            
             latest_transcript.append(new_ai_entry.model_dump())
             transcript_ref.set(latest_transcript)
             logger.info(f"Appended AI instructions to transcript. New length: {len(latest_transcript)}")
-            
-            # AIメッセージの追加後にカウンターを更新しない（ユーザーメッセージのみをカウント対象とするため）
         except Exception as e:
             logger.error(f"Error updating transcript: {e}", exc_info=True)
-            # エラーが発生しても処理を継続
-    else:
-        logger.info("No AI instructions to append to transcript.")
 
-    # 最新のroomデータを取得して返却用に利用
     room_data_after_scheduling = db.reference(room_ref_path).get() or {}
 
     final_result = AgentResult(
@@ -680,11 +573,14 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         updatedNotes=list(room_data_after_scheduling.get(
             "notes", {}).values()) if room_data_after_scheduling.get("notes") else None,
         updatedAgenda=room_data_after_scheduling.get("currentAgenda"),
-        updatedOverviewDiagram=room_data_after_scheduling.get(
-            "overviewDiagram")
+        updatedOverviewDiagram=room_data_after_scheduling.get("overviewDiagram")
     )
     return final_result
 
+
+# ================================================================
+# /invoke endpoint
+# ================================================================
 
 @app.post("/invoke", response_model=JsonRpcResponse, summary="Invoke AIMeeBo Agent")
 async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTasks):
@@ -695,7 +591,6 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
     if not task_payload_dict:
         return JsonRpcResponse(error={"code": -32602, "message": "Invalid params: 'task' payload missing"}, id=request.id)
 
-    # Pydanticモデルに変換
     task_payload: TaskPayload = request.params.get("task")
 
     room_id = task_payload.roomId
@@ -706,47 +601,11 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
         room_ref = db.reference(f"rooms/{room_id}")
         transcript_ref = room_ref.child("transcript")
 
-        if task_payload.messages and len(task_payload.messages) == 1:
-            latest_llm_message = task_payload.messages[0]  # LLMMessage形式
-            if latest_llm_message.parts:  # partsがあることを確認
-                text_to_save = latest_llm_message.parts[0].get(
-                    'text', '[内容なし]')
-
-                # Firebaseから参加者情報を取得し、displayNameを優先的に使用
-                participant_info = room_ref.child(
-                    f"participants/{task_payload.speakerId}").get()
-                resolved_speaker_name = participant_info.get(
-                    "name") if participant_info else task_payload.speakerName
-
-                new_db_entry = DBTranscriptEntry(
-                    text=text_to_save,
-                    userId=task_payload.speakerId,  # フロントから来たspeakerIdを使用
-                    userName=resolved_speaker_name,  # Firebaseの参加者名を使用
-                    timestamp=datetime.utcnow().isoformat() + "Z",
-                    role="user"  # ユーザーの発言として明示的に設定
-                )
-                new_db_entry_dict = new_db_entry.model_dump()
-
-                current_transcript_list = transcript_ref.get()
-                if current_transcript_list is None or not isinstance(current_transcript_list, list):
-                    current_transcript_list = []
-                current_transcript_list.append(new_db_entry_dict)
-                transcript_ref.set(current_transcript_list)
-                logger.info(
-                    f"[{room_id}] Appended new message to transcript (DB schema). New length: {len(current_transcript_list)}")
-            else:  # partsがない場合 (通常ありえないが念のため)
-                logger.warning(
-                    f"[{room_id}] Received message with no parts: {latest_llm_message}. Skipping transcript append.")
-
-        elif task_payload.messages:
-            logger.warning(
-                f"[{room_id}] task_payload.messages contained {len(task_payload.messages)} messages, expected 1. Processing only the first one.")
-            # (上記と同様の処理を最初のメッセージに対して行う)
+        if task_payload.messages and len(task_payload.messages) >= 1:
             latest_llm_message = task_payload.messages[0]
             if latest_llm_message.parts:
-                text_to_save = latest_llm_message.parts[0].get(
-                    'text', '[内容なし]')
-                # Firebaseから参加者情報を取得し、displayNameを優先的に使用
+                text_to_save = latest_llm_message.parts[0].get('text', '[内容なし]')
+
                 participant_info = room_ref.child(
                     f"participants/{task_payload.speakerId}").get()
                 resolved_speaker_name = participant_info.get(
@@ -757,39 +616,41 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
                     userId=task_payload.speakerId,
                     userName=resolved_speaker_name,
                     timestamp=datetime.utcnow().isoformat() + "Z",
-                    role="user"  # ユーザーの発言として明示的に設定
+                    role="user"
                 )
-                # ... (追記処理)
+                new_db_entry_dict = new_db_entry.model_dump()
+
+                current_transcript_list = transcript_ref.get()
+                if current_transcript_list is None or not isinstance(current_transcript_list, list):
+                    current_transcript_list = []
+                current_transcript_list.append(new_db_entry_dict)
+                transcript_ref.set(current_transcript_list)
+                logger.info(
+                    f"[{room_id}] Appended new message to transcript. New length: {len(current_transcript_list)}")
 
         # デモルームの場合はここで処理を終了
         if room_id == ALLOWED_DEMO_ROOM:
-            logger.info(
-                f"[{room_id}] Demo room message. Skipping AI processing.")
+            logger.info(f"[{room_id}] Demo room message. Skipping AI processing.")
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
 
         room_data = room_ref.get()
         if room_data is None:
             return JsonRpcResponse(error={"code": -32000, "message": f"Server error: Room {room_id} disappeared"}, id=request.id)
 
-        db_transcript_entries = room_data.get(
-            "transcript", [])  # これは新スキーマの辞書のリスト
-        
-        # ユーザーメッセージのみをカウント（AIメッセージを除外）
+        db_transcript_entries = room_data.get("transcript", [])
+
         user_messages = [entry for entry in db_transcript_entries if entry.get("role") != "ai"]
         current_user_message_count = len(user_messages)
 
-        last_processed_count = room_data.get(
-            "last_llm_processed_message_count", 0)
+        last_processed_count = room_data.get("last_llm_processed_message_count", 0)
         if last_processed_count > current_user_message_count:
             last_processed_count = 0
             room_ref.child("last_llm_processed_message_count").set(0)
-            logger.warning(
-                f"[{room_id}] Reset last_llm_processed_message_count to 0.")
+            logger.warning(f"[{room_id}] Reset last_llm_processed_message_count to 0.")
 
         logger.info(
             f"[{room_id}] Current user messages: {current_user_message_count}, Last processed: {last_processed_count}, Trigger: {LLM_TRIGGER_MESSAGE_COUNT}")
 
-        # 処理中フラグをチェック
         is_processing = room_data.get("is_llm_processing", False)
         if is_processing:
             logger.info(f"[{room_id}] LLM processing already in progress. Skipping.")
@@ -797,28 +658,20 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
 
         if (current_user_message_count - last_processed_count) >= LLM_TRIGGER_MESSAGE_COUNT:
             logger.info(f"[{room_id}] Triggering LLM processing.")
-            
-            # 処理中フラグを設定
+
             room_ref.child("is_llm_processing").set(True)
-            
+
             try:
-                # llmApiKeyを渡す
-                agent_processing_result = await orchestrate_agents(task_payload, background_tasks, db_transcript_entries, task_payload.llmApiKey)
-                
-                # 処理完了後にカウンターを更新
+                agent_processing_result = await orchestrate_agents(
+                    task_payload, background_tasks, db_transcript_entries, task_payload.llmApiKey)
+
                 room_ref.child("last_llm_processed_message_count").set(current_user_message_count)
-                
-                # 処理中フラグをクリア
                 room_ref.child("is_llm_processing").set(False)
-                
+
                 return JsonRpcResponse(result=agent_processing_result, id=request.id)
             except Exception as e:
-                # エラーが発生した場合、ログに記録し、クライアントにエラーを返す
                 logger.error(f"[{room_id}] Error in orchestrate_agents: {e}", exc_info=True)
-                
-                # 処理中フラグをクリア
                 room_ref.child("is_llm_processing").set(False)
-                
                 return JsonRpcResponse(error={"code": -32000, "message": f"LLM processing error: {str(e)}"}, id=request.id)
         else:
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
@@ -827,20 +680,29 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
         logger.error(f"Error in /invoke: {e}", exc_info=True)
         return JsonRpcResponse(error={"code": -32000, "message": f"Server error: {e}"}, id=request.id)
 
-# ... (create_room_endpoint は変更なし)
 
+# ================================================================
+# Create Room (マルチプロバイダー対応)
+# ================================================================
 
 class CreateRoomRequest(BaseModel):
     idToken: str
     room_id: str
     room_name: Optional[str] = None
     meeting_subtitle: Optional[str] = None
+    # マルチプロバイダー新フィールド
+    api_keys: Optional[Dict[str, str]] = None  # {"gemini": "key", "openai": "key", "anthropic": "key"}
+    agent_models: Optional[Dict[str, str]] = None  # {"orchestrator": "model", "TaskManagementAgent": "model", ...}
+    default_model: Optional[str] = None
+    stt_provider: Optional[str] = None
+    tts_provider: Optional[str] = None
+    # 後方互換旧フィールド
     llm_api_key: Optional[str] = None
     llm_models: Optional[List[str]] = None
-    speakerName: Optional[str] = None  # speakerNameを追加
-    representativeMode: Optional[bool] = False  # 代表参加者モード
-    api_key_duration_hours: Optional[int] = 24  # APIキーの持続時間（時間）
-    
+    speakerName: Optional[str] = None
+    representativeMode: Optional[bool] = False
+    api_key_duration_hours: Optional[int] = 24
+
     @field_validator('api_key_duration_hours')
     @classmethod
     def validate_api_key_duration(cls, v):
@@ -849,7 +711,7 @@ class CreateRoomRequest(BaseModel):
                 raise ValueError('APIキー持続時間は整数で指定してください')
             if v < 1:
                 raise ValueError('APIキー持続時間は1時間以上で指定してください')
-            if v > 8760:  # 1年 = 365 * 24 = 8760時間
+            if v > 8760:
                 raise ValueError('APIキー持続時間は1年（8760時間）以下で指定してください')
         return v
 
@@ -866,16 +728,13 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
         decoded_token = firebase_auth.verify_id_token(request_data.idToken)
         uid = decoded_token['uid']
         user_record = firebase_auth.get_user(uid)
-        # speakerNameが提供されていればそれを使用、なければ既存のロジック
         display_name = request_data.speakerName or user_record.display_name or user_record.email or f"user_{uid[:5]}"
 
         room_ref = db.reference(f"rooms/{room_id}")
         if room_ref.get():
-            # ルームが既に存在する場合、作成者がそのルームの参加者として追加されているか確認
             if room_ref.child(f"participants/{uid}").get():
                 return {"status": "success", "message": "Room already exists and you are a participant.", "data": room_ref.get()}
             else:
-                # ルームは存在するが、作成者が参加者ではない場合、参加者として追加
                 participant_role = "Representative" if request_data.representativeMode else "Creator"
                 participant_data = {"name": display_name, "role": participant_role,
                                     "joinedAt": datetime.utcnow().isoformat() + "Z"}
@@ -884,15 +743,11 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
 
         meeting_subtitle = request_data.meeting_subtitle or ""
 
-        # Firebase Realtime Databaseからtemplateルームのデータを読み込む
         template_room_ref = db.reference("rooms/template")
         template_room_data = template_room_ref.get()
 
         if not template_room_data:
-            logger.error(
-                "Template room data not found in Firebase at rooms/template")
-            # templateルームが存在しない場合は、最低限の初期データでルームを作成
-            logger.warning("Using minimal initial data for the new room.")
+            logger.warning("Template room not found. Using minimal initial data.")
             new_room_data = {
                 "sessionId": f"session_{room_id}",
                 "sessionTitle": room_name,
@@ -911,20 +766,17 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
                 "representativeMode": request_data.representativeMode or False
             }
         else:
-            # テンプレートデータをコピーし、新しいルームの情報を設定
             new_room_data = template_room_data.copy()
             new_room_data["sessionId"] = f"session_{room_id}"
             new_room_data["sessionTitle"] = room_name
             new_room_data["meetingSubtitle"] = meeting_subtitle
             new_room_data["startTime"] = datetime.utcnow().isoformat() + "Z"
             new_room_data["ownerId"] = uid
-            # テンプレートの参加者リストは引き継がず、作成者のみを追加
             new_room_data["participants"] = {}
             new_room_data["last_llm_processed_message_count"] = 0
             new_room_data["is_llm_processing"] = False
             new_room_data["representativeMode"] = request_data.representativeMode or False
 
-        # 作成者を参加者として追加
         participant_role = "Representative" if request_data.representativeMode else "Creator"
         new_room_data["participants"][uid] = {
             "name": display_name,
@@ -934,38 +786,47 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
 
         room_ref.set(new_room_data)
 
-        # room_secretsにAPIキーとLLMモデルを保存
-        room_secrets_ref = db.reference(f"room_secrets/{room_id}")
-        secrets_data = {
-            'created_at': datetime.utcnow().isoformat() + "Z",
-            'created_by': uid
-        }
+        # ================================================================
+        # room_secrets にマルチプロバイダー設定を保存
+        # ================================================================
+        duration_hours = request_data.api_key_duration_hours or 24
 
-        if request_data.llm_api_key:
-            # APIキー持続時間を取得（デフォルトは24時間）
-            duration_hours = request_data.api_key_duration_hours or 24
-            key_stored_successfully = api_key_manager.store_room_api_key(
+        # 新形式: プロバイダー別APIキー
+        if request_data.api_keys:
+            for provider, key in request_data.api_keys.items():
+                if key and key.strip():
+                    api_key_manager.store_provider_api_key(
+                        room_id, provider, key.strip(), uid, duration_hours)
+            logger.info(f"Room {room_id}: Multi-provider API keys stored.")
+
+        # 旧形式互換: 単一APIキー → Geminiキーとして保存
+        elif request_data.llm_api_key:
+            api_key_manager.store_room_api_key(
                 room_id, request_data.llm_api_key, uid, duration_hours)
-            if key_stored_successfully:
-                # ルームデータにもAPIキーの期限情報を保存
-                api_key_expires_at = (datetime.utcnow() + timedelta(hours=duration_hours)).isoformat() + "Z"
-                room_ref.child("apiKeyExpiresAt").set(api_key_expires_at)
-                room_ref.child("apiKeyDurationHours").set(duration_hours)
-                logger.info(
-                    f"Room {room_id} created and LLM API Key stored in room_secrets with {duration_hours}h duration.")
-            else:
-                logger.warning(
-                    f"Room {room_id} created, but LLM API Key could not be stored in room_secrets. Check logs for details.")
-        else:
-            logger.info(f"Room {room_id} created without LLM API Key.")
+            logger.info(f"Room {room_id}: Legacy single API key stored.")
 
+        # ルーム設定を保存
+        room_config = {}
+        if request_data.agent_models:
+            room_config["agent_models"] = request_data.agent_models
+        if request_data.default_model:
+            room_config["default_model"] = request_data.default_model
+        if request_data.stt_provider:
+            room_config["stt_provider"] = request_data.stt_provider
+        if request_data.tts_provider:
+            room_config["tts_provider"] = request_data.tts_provider
+        if room_config:
+            api_key_manager.store_room_config(room_id, room_config)
+
+        # 旧形式互換: llm_models
         if request_data.llm_models:
-            secrets_data['llm_models'] = request_data.llm_models
+            room_secrets_ref = db.reference(f"room_secrets/{room_id}")
             room_secrets_ref.update({'llm_models': request_data.llm_models})
-            logger.info(
-                f"Room {room_id} created and LLM models stored in room_secrets.")
-        else:
-            logger.info(f"Room {room_id} created without specific LLM models.")
+
+        # APIキー期限情報をルームデータにも保存
+        api_key_expires_at = (datetime.utcnow() + timedelta(hours=duration_hours)).isoformat() + "Z"
+        room_ref.child("apiKeyExpiresAt").set(api_key_expires_at)
+        room_ref.child("apiKeyDurationHours").set(duration_hours)
 
         return {"status": "success", "message": "Room created successfully", "data": new_room_data}
     except Exception as e:
@@ -974,11 +835,97 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
             status_code=500, detail=f"Failed to create room: {str(e)}")
 
 
+# ================================================================
+# STT / TTS Endpoints
+# ================================================================
+
+class TTSRequest(BaseModel):
+    text: str
+    room_id: str
+    language: str = "ja"
+    voice: str = "alloy"
+
+
+@app.post("/stt", summary="Speech-to-text transcription")
+async def stt_endpoint(
+    audio: UploadFile = File(...),
+    room_id: str = Form(...),
+    language: str = Form("ja"),
+):
+    """音声ファイルを受信し、設定されたSTTプロバイダーでテキストに変換"""
+    from stt_provider import STTProvider
+
+    audio_data = await audio.read()
+
+    room_config = api_key_manager.get_room_config(room_id)
+    stt_provider_name = room_config.get("stt_provider", "") or os.environ.get("DEFAULT_STT_PROVIDER", "openai")
+
+    # STTプロバイダーに対応するAPIキーを取得
+    provider_key_map = {"openai": "openai", "google": "gemini"}
+    key_provider = provider_key_map.get(stt_provider_name, stt_provider_name)
+    stt_api_key = api_key_manager.get_provider_api_key(room_id, key_provider)
+    if not stt_api_key:
+        stt_api_key = get_default_api_key(key_provider)
+
+    if not stt_api_key:
+        raise HTTPException(
+            status_code=503, detail=f"No API key available for STT provider: {stt_provider_name}")
+
+    try:
+        transcript_text = await STTProvider.transcribe(
+            audio_data=audio_data,
+            provider=stt_provider_name,
+            api_key=stt_api_key,
+            language=language,
+            mime_type=audio.content_type or "audio/webm",
+        )
+        return {"text": transcript_text, "provider": stt_provider_name}
+    except Exception as e:
+        logger.error(f"STT error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"STT processing failed: {str(e)}")
+
+
+@app.post("/tts", summary="Text-to-speech synthesis")
+async def tts_endpoint(request_data: TTSRequest):
+    """テキストを受信し、設定されたTTSプロバイダーで音声に変換"""
+    from tts_provider import TTSProvider
+
+    room_config = api_key_manager.get_room_config(request_data.room_id)
+    tts_provider_name = room_config.get("tts_provider", "") or os.environ.get("DEFAULT_TTS_PROVIDER", "openai")
+
+    provider_key_map = {"openai": "openai", "google": "gemini"}
+    key_provider = provider_key_map.get(tts_provider_name, tts_provider_name)
+    tts_api_key = api_key_manager.get_provider_api_key(request_data.room_id, key_provider)
+    if not tts_api_key:
+        tts_api_key = get_default_api_key(key_provider)
+
+    if not tts_api_key:
+        raise HTTPException(
+            status_code=503, detail=f"No API key available for TTS provider: {tts_provider_name}")
+
+    try:
+        audio_bytes = await TTSProvider.synthesize(
+            text=request_data.text,
+            provider=tts_provider_name,
+            api_key=tts_api_key,
+            language=request_data.language,
+            voice=request_data.voice,
+        )
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        logger.error(f"TTS error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"TTS processing failed: {str(e)}")
+
+
+# ================================================================
+# Approve Join Request
+# ================================================================
+
 class ApproveJoinRequest(BaseModel):
     idToken: str
     roomId: str
     requesterUid: str
-    action: str  # "approve" or "reject"
+    action: str
 
 
 @app.post("/approve_join_request", summary="Approve or reject a join request for a meeting room")
@@ -993,48 +940,35 @@ async def approve_join_request_endpoint(request_data: ApproveJoinRequest):
         if not room_data:
             raise HTTPException(status_code=404, detail="Room not found.")
 
-        # リクエストを送信したユーザーがルームのオーナーであることを確認
         if room_data.get("owner_uid") != owner_uid:
             raise HTTPException(
                 status_code=403, detail="Only the room owner can approve/reject join requests.")
 
         join_requests_ref = room_ref.child("join_requests")
-        requester_request = join_requests_ref.child(
-            request_data.requesterUid).get()
+        requester_request = join_requests_ref.child(request_data.requesterUid).get()
 
         if not requester_request:
-            raise HTTPException(
-                status_code=404, detail="Join request not found for this user.")
+            raise HTTPException(status_code=404, detail="Join request not found for this user.")
 
         if request_data.action == "approve":
-            # 参加者として追加
             participant_data = {
                 "name": requester_request.get("name", f"user_{request_data.requesterUid[:5]}"),
                 "role": "Participant",
                 "joinedAt": datetime.utcnow().isoformat() + "Z"
             }
-            room_ref.child(
-                f"participants/{request_data.requesterUid}").set(participant_data)
-            # リクエストを削除
+            room_ref.child(f"participants/{request_data.requesterUid}").set(participant_data)
             join_requests_ref.child(request_data.requesterUid).delete()
-            logger.info(
-                f"User {request_data.requesterUid} approved and added to room {request_data.roomId}.")
+            logger.info(f"User {request_data.requesterUid} approved for room {request_data.roomId}.")
             return {"status": "success", "message": "User approved and added to participants."}
         elif request_data.action == "reject":
-            # リクエストを削除
             join_requests_ref.child(request_data.requesterUid).delete()
-            logger.info(
-                f"Join request for user {request_data.requesterUid} rejected for room {request_data.roomId}.")
             return {"status": "success", "message": "Join request rejected."}
         else:
-            raise HTTPException(
-                status_code=400, detail="Invalid action. Must be 'approve' or 'reject'.")
+            raise HTTPException(status_code=400, detail="Invalid action. Must be 'approve' or 'reject'.")
 
     except Exception as e:
-        logger.error(
-            f"Error in /approve_join_request for room {request_data.roomId}: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Unexpected error: {str(e)}")
+        logger.error(f"Error in /approve_join_request: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 if __name__ == "__main__":

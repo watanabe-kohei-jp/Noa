@@ -1,58 +1,43 @@
 import json
-from typing import List, Tuple, Dict, Any, Optional
-import uuid  # uuid をインポート
+from typing import List, Tuple, Dict, Any
+import uuid
 
-# Vertex AI SDK
-try:
-    from vertexai.generative_models import GenerativeModel, Part as VertexPart
-except ImportError:
-    # This will be handled by VERTEX_AI_AVAILABLE from config
-    pass
-
-from models import Message
-from config import logger, VERTEX_AI_AVAILABLE, VERTEX_MODEL_NAME
-import os  # osモジュールをインポート
-
-# BaseAgentのインポートパスはmain.pyの構造に依存するため、ここでは一旦コメントアウト
-# from .base_agent import MeetingAgent
+from llm_provider import llm_complete, strip_code_blocks
+from config import logger
 
 
-class AgendaManagementAgent:  # MeetingAgent): # BaseAgentを継承する場合はコメントを外す
+class AgendaManagementAgent:
     def __init__(self, config_path: str):
-        self.config_path = config_path  # 現状は使用しないが、将来的な設定読み込みのために保持
-        # 設定ファイルを使用する場合はここで読み込み処理などを追加
-        # self.config = load_json(config_path)
+        self.config_path = config_path
         logger.info(
             f"AgendaManagementAgent initialized with config: {config_path}")
 
-    async def execute(self, instruction: str, conversation_history: List[Message], current_data: Dict[str, Any], llm_model: GenerativeModel, **kwargs) -> Tuple[Dict[str, Any], str]:
-        # kwargs を受け取ることで、main.pyからの他の引数（speakerNameなど）を許容
+    async def execute(self, instruction: str, conversation_history: List[Any], current_data: Dict[str, Any], model_name: str, api_key: str, **kwargs) -> Tuple[Dict[str, Any], str]:
         return await handle_agenda_management_request(
             instruction=instruction,
             conversation_history=conversation_history,
             current_data=current_data,
-            llm_model=llm_model
-            # speaker_name は handle_agenda_management_request が直接受け取らないため渡さない
+            model_name=model_name,
+            api_key=api_key
         )
 
 
 async def handle_agenda_management_request(
     instruction: str,
-    conversation_history: List[Message],
+    conversation_history: List[Any],
     current_data: Dict[str, Any],
-    llm_model: GenerativeModel
+    model_name: str,
+    api_key: str
 ) -> Tuple[Dict[str, Any], str]:
     logger.info(f"Agenda management for instruction: {instruction}")
     session_data = current_data
 
-    # currentAgenda と suggestedNextTopics の初期値をFirebaseのオブジェクト形式に合わせる
     current_agenda_obj = session_data.get(
-        "currentAgenda", {"mainTopic": "", "details": []})  # detailsをリストに
+        "currentAgenda", {"mainTopic": "", "details": []})
     current_main_topic = current_agenda_obj.get("mainTopic", "")
 
-    suggested_next_topics_obj = session_data.get(
-        "suggestedNextTopics", {})  # オブジェクト形式に
-    if not isinstance(suggested_next_topics_obj, dict):  # リストで来てしまった場合のフォールバック
+    suggested_next_topics_obj = session_data.get("suggestedNextTopics", {})
+    if not isinstance(suggested_next_topics_obj, dict):
         logger.warning(
             f"suggestedNextTopics is not a dict, attempting to convert: {suggested_next_topics_obj}")
         if isinstance(suggested_next_topics_obj, list):
@@ -61,17 +46,14 @@ async def handle_agenda_management_request(
         else:
             suggested_next_topics_obj = {}
 
-    if not VERTEX_AI_AVAILABLE or llm_model is None:
-        logger.warning(
-            "Vertex AI not available for agenda management or LLM model not provided.")
-        return {"currentAgenda": current_agenda_obj, "suggestedNextTopics": suggested_next_topics_obj}, "Agenda not updated (Vertex AI unavailable or LLM model not provided)."
-    try:
-        model = llm_model  # 引数で受け取ったllm_modelを使用
+    if not model_name or not api_key:
+        logger.warning("LLM not configured for agenda management.")
+        return {"currentAgenda": current_agenda_obj, "suggestedNextTopics": suggested_next_topics_obj}, "Agenda not updated (LLM not configured)."
 
+    try:
         history_str = "\n".join(
             [f"{msg.role.capitalize()}: {msg.parts[0]['text']}" for msg in conversation_history if msg.parts and msg.parts[0].get('text')])
 
-        # Include the entire session_data in the prompt for context
         session_data_json_str = json.dumps(
             session_data, ensure_ascii=False, indent=2)
 
@@ -93,62 +75,50 @@ JSONオブジェクトのみ出力してください。
 更新された議題 (JSONオブジェクト):"""
         logger.info(
             f"Sending agenda prompt to LLM. Instruction: {instruction}")
-        response = await model.generate_content_async(prompt)
-        llm_response_text = response.text if hasattr(
-            response, 'text') and response.text else ""
-        if not llm_response_text and response.candidates and response.candidates[0].content.parts:
-            llm_response_text = response.candidates[0].content.parts[0].text
+        llm_response_text = await llm_complete(model=model_name, prompt=prompt, api_key=api_key)
         logger.info(f"LLM agenda response: {llm_response_text}")
+
         if not llm_response_text:
-            # Return data in the new expected format
-            return {"currentAgenda": {"mainTopic": current_main_topic, "details": []}, "suggestedNextTopics": suggested_next_topics_list}, "LLM returned empty agenda update."
-        cleaned_response_text = llm_response_text.strip()
-        if cleaned_response_text.startswith("```json"):
-            cleaned_response_text = cleaned_response_text[7:-3].strip()
-        elif cleaned_response_text.startswith("```"):
-            cleaned_response_text = cleaned_response_text[3:-3].strip()
-        elif cleaned_response_text.startswith("`") and cleaned_response_text.endswith("`"):
-            cleaned_response_text = cleaned_response_text[1:-1].strip()
+            return {"currentAgenda": {"mainTopic": current_main_topic, "details": []}, "suggestedNextTopics": suggested_next_topics_obj}, "LLM returned empty agenda update."
+
+        cleaned_response_text = strip_code_blocks(llm_response_text)
 
         agenda_update = json.loads(cleaned_response_text)
         if not isinstance(agenda_update, dict) or \
            "current_agenda_main_topic" not in agenda_update or \
            "current_agenda_details" not in agenda_update or \
-           "suggested_next_topics_list" not in agenda_update:  # LLMはリストで返す想定
+           "suggested_next_topics_list" not in agenda_update:
             raise ValueError(
-                "LLM agenda response not a valid agenda object with new keys (main_topic, details, suggested_topics_list).")
+                "LLM agenda response not a valid agenda object with new keys.")
 
         new_main_topic = agenda_update.get(
             "current_agenda_main_topic", current_main_topic)
 
-        # current_agenda_details は文字列のリストとしてLLMから来ると想定
         new_details_texts_list = agenda_update.get(
             "current_agenda_details", [])
-        formatted_details_list = []  # Firebase用にリスト形式に変換
+        formatted_details_list = []
         if isinstance(new_details_texts_list, list):
             for idx, text_detail in enumerate(new_details_texts_list):
                 if isinstance(text_detail, str):
                     formatted_details_list.append(
                         {"id": f"detail_{idx}_{uuid.uuid4().hex[:6]}", "text": text_detail})
-                elif isinstance(text_detail, dict) and "text" in text_detail:  # LLMが既にオブジェクトで返した場合
+                elif isinstance(text_detail, dict) and "text" in text_detail:
                     formatted_details_list.append({
                         "id": text_detail.get("id", f"detail_{idx}_{uuid.uuid4().hex[:6]}"),
                         "text": text_detail.get("text"),
                         "timestamp": text_detail.get("timestamp")
                     })
 
-        # suggested_next_topics_list は文字列のリストとしてLLMから来ると想定
         new_suggested_topics_list = agenda_update.get(
             "suggested_next_topics_list", [])
-        formatted_suggested_topics_obj = {}  # Firebase用にオブジェクト形式に変換
+        formatted_suggested_topics_obj = {}
         if isinstance(new_suggested_topics_list, list):
             for idx, topic_text in enumerate(new_suggested_topics_list):
                 if isinstance(topic_text, str):
-                    # ユニークID生成
                     topic_id = f"nexttopic_{idx}_{uuid.uuid4().hex[:6]}"
                     formatted_suggested_topics_obj[topic_id] = {
-                        "title": topic_text}  # Firebaseではオブジェクトで格納
-        elif isinstance(new_suggested_topics_list, str):  # 単一文字列で来た場合
+                        "title": topic_text}
+        elif isinstance(new_suggested_topics_list, str):
             topic_id = f"nexttopic_0_{uuid.uuid4().hex[:6]}"
             formatted_suggested_topics_obj[topic_id] = {
                 "title": new_suggested_topics_list}

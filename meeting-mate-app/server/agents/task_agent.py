@@ -1,26 +1,9 @@
 import json
-import uuid  # Added for fallback ID generation
-from typing import List, Tuple, Dict, Any, Optional
+import uuid
+from typing import List, Tuple, Dict, Any
 
-# Vertex AI SDK
-try:
-    from vertexai.generative_models import GenerativeModel, Part as VertexPart
-except ImportError:
-    # This will be handled by VERTEX_AI_AVAILABLE from config
-    pass
-
-# Import LLMMessage from main.py instead of Message from models
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from main import LLMMessage
-else:
-    # For runtime, we'll use a duck-typed approach
-    LLMMessage = object
-from config import logger, VERTEX_AI_AVAILABLE, VERTEX_MODEL_NAME
-import os  # osモジュールをインポート
-# file_utils (load_session_data, save_session_data) are typically used by the orchestrator,
-# not directly by individual agents, so they are not imported here.
-# Agents receive necessary data as arguments and return updated data.
+from llm_provider import llm_complete, strip_code_blocks
+from config import logger
 
 
 class TaskManagementAgent:
@@ -29,12 +12,13 @@ class TaskManagementAgent:
         logger.info(
             f"TaskManagementAgent initialized with config: {config_path}")
 
-    async def execute(self, instruction: str, conversation_history: List[Any], current_data: Dict[str, Any], llm_model: GenerativeModel, **kwargs) -> Tuple[Dict[str, Any], str]:
+    async def execute(self, instruction: str, conversation_history: List[Any], current_data: Dict[str, Any], model_name: str, api_key: str, **kwargs) -> Tuple[Dict[str, Any], str]:
         return await handle_task_management_request(
             instruction=instruction,
             conversation_history=conversation_history,
             current_data=current_data,
-            llm_model=llm_model
+            model_name=model_name,
+            api_key=api_key
         )
 
 
@@ -42,16 +26,15 @@ async def handle_task_management_request(
     instruction: str,
     conversation_history: List[Any],
     current_data: Dict[str, Any],
-    llm_model: GenerativeModel
+    model_name: str,
+    api_key: str
 ) -> Tuple[Dict[str, Any], str]:
     """
-    Manages tasks based on user instruction using Vertex AI.
-    If Vertex AI is not available, it performs a fallback action.
+    Manages tasks based on user instruction using LLM via litellm.
     """
     session_data = current_data
-    # Firebaseでは tasks はオブジェクトになる想定
     current_tasks_dict = session_data.get("tasks", {})
-    if not isinstance(current_tasks_dict, dict):  # リストで来てしまった場合のフォールバック
+    if not isinstance(current_tasks_dict, dict):
         logger.warning(
             f"Tasks data is not a dict, attempting to convert: {current_tasks_dict}")
         if isinstance(current_tasks_dict, list) and all(isinstance(t, dict) and "id" in t for t in current_tasks_dict):
@@ -60,11 +43,10 @@ async def handle_task_management_request(
         else:
             current_tasks_dict = {}
 
-    if not VERTEX_AI_AVAILABLE or llm_model is None:
-        # Fallback: create a simple 'todo' task
+    if not model_name or not api_key:
         new_task_id = f"task_{uuid.uuid4()}"
         new_task = {
-            "id": new_task_id,  # idはオブジェクトのキーにもなるが、内部にも保持
+            "id": new_task_id,
             "title": instruction.capitalize(),
             "status": "todo",
             "detail": f"Added (fallback): {instruction}",
@@ -73,10 +55,9 @@ async def handle_task_management_request(
         }
         current_tasks_dict[new_task_id] = new_task
         logger.info(f"Fallback task addition: {new_task}")
-        return {"tasks": current_tasks_dict}, f"Task '{new_task['title']}' added (Vertex AI unavailable or LLM model not provided)."
-    try:
-        model = llm_model  # 引数で受け取ったllm_modelを使用
+        return {"tasks": current_tasks_dict}, f"Task '{new_task['title']}' added (LLM not configured)."
 
+    try:
         history_str = "\n".join(
             [f"{msg.role.capitalize()}: {msg.parts[0]['text']}" for msg in conversation_history if msg.parts and msg.parts[0].get('text')])
 
@@ -140,32 +121,20 @@ async def handle_task_management_request(
 更新後のタスクリスト (JSON配列):"""
         logger.info(
             f"Sending task update prompt to LLM. Instruction: {instruction}")
-        response = await model.generate_content_async(prompt)
-
-        llm_response_text = ""
-        if response.candidates and response.candidates[0].content.parts:
-            llm_response_text = response.candidates[0].content.parts[0].text
+        llm_response_text = await llm_complete(model=model_name, prompt=prompt, api_key=api_key)
 
         logger.info(f"LLM task response: {llm_response_text}")
         if not llm_response_text:
             return {"tasks": current_tasks_dict}, "LLM returned empty task update."
 
-        cleaned_response_text = llm_response_text.strip()
-        if cleaned_response_text.startswith("```json"):
-            cleaned_response_text = cleaned_response_text[7:-3].strip()
-        elif cleaned_response_text.startswith("```"):
-            cleaned_response_text = cleaned_response_text[3:-3].strip()
-        elif cleaned_response_text.startswith("`") and cleaned_response_text.endswith("`"):
-            cleaned_response_text = cleaned_response_text[1:-1].strip()
+        cleaned_response_text = strip_code_blocks(llm_response_text)
 
-        # LLMはタスクのリストを返すと想定。これを辞書形式に変換する。
         updated_tasks_from_llm_list = json.loads(cleaned_response_text)
 
         if not isinstance(updated_tasks_from_llm_list, list):
-            # LLMが誤って辞書を返した場合のフォールバック（例： { "tasks": [...] } ）
             if isinstance(updated_tasks_from_llm_list, dict) and "tasks" in updated_tasks_from_llm_list and isinstance(updated_tasks_from_llm_list["tasks"], list):
                 updated_tasks_from_llm_list = updated_tasks_from_llm_list["tasks"]
-            else:  # それでもリストでない場合はエラー
+            else:
                 logger.error(
                     f"LLM task response is not a list: {updated_tasks_from_llm_list}")
                 return {"tasks": current_tasks_dict}, "LLM task response was not a list."
@@ -173,11 +142,9 @@ async def handle_task_management_request(
         updated_tasks_dict = {}
         for task in updated_tasks_from_llm_list:
             if isinstance(task, dict) and "id" in task:
-                # Basic validation for each task item
-                if not all(k in task for k in ["title", "status"]):  # idは既にチェック済み
+                if not all(k in task for k in ["title", "status"]):
                     logger.warning(
                         f"Task item missing required keys (title, status): {task}")
-                    # スキップするか、デフォルト値を設定するか。ここではログのみ。
                     continue
                 if task.get("status") not in ["todo", "doing", "done"]:
                     logger.warning(

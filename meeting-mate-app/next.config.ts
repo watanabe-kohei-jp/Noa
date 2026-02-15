@@ -31,6 +31,14 @@ const nextConfig: NextConfig = {
           source: '/create_room',
           destination: 'http://localhost:8000/create_room',
         },
+        {
+          source: '/stt',
+          destination: 'http://localhost:8000/stt',
+        },
+        {
+          source: '/tts',
+          destination: 'http://localhost:8000/tts',
+        },
       ];
     },
   }),

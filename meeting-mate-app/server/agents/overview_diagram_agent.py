@@ -1,16 +1,8 @@
 import json
-from typing import List, Tuple, Dict, Any, Optional
-import uuid
+from typing import List, Tuple, Dict, Any
 
-# Vertex AI SDK
-try:
-    from vertexai.generative_models import GenerativeModel
-except ImportError:
-    pass
-
-from models import Message  # Assuming Message model is in a shared models.py
-from config import logger, VERTEX_AI_AVAILABLE, VERTEX_MODEL_NAME
-import os  # osモジュールをインポート
+from llm_provider import llm_complete
+from config import logger
 
 
 class OverviewDiagramAgent:
@@ -19,27 +11,28 @@ class OverviewDiagramAgent:
         logger.info(
             f"OverviewDiagramAgent initialized with config: {config_path}")
 
-    async def execute(self, instruction: str, conversation_history: List[Message], current_data: Dict[str, Any], llm_model: GenerativeModel, **kwargs) -> Tuple[Dict[str, Any], str]:
+    async def execute(self, instruction: str, conversation_history: List[Any], current_data: Dict[str, Any], model_name: str, api_key: str, **kwargs) -> Tuple[Dict[str, Any], str]:
         return await handle_overview_diagram_request(
             instruction=instruction,
             conversation_history=conversation_history,
             current_data=current_data,
-            llm_model=llm_model
+            model_name=model_name,
+            api_key=api_key
         )
 
 
 async def handle_overview_diagram_request(
     instruction: str,
-    conversation_history: List[Message],
+    conversation_history: List[Any],
     current_data: Dict[str, Any],
-    llm_model: GenerativeModel
+    model_name: str,
+    api_key: str
 ) -> Tuple[Dict[str, Any], str]:
     logger.info(f"Overview diagram management for instruction: {instruction}")
     session_data = current_data
-    # Extract existing diagram data if available, default to a simple initial diagram
     overview_diagram_obj = session_data.get("overviewDiagram", {
                                             "mermaidDefinition": "graph TD;\n    A[会議開始];", "title": "概要図"})
-    if not isinstance(overview_diagram_obj, dict):  # 念のため型チェック
+    if not isinstance(overview_diagram_obj, dict):
         overview_diagram_obj = {
             "mermaidDefinition": "graph TD;\n    A[会議開始];", "title": "概要図"}
 
@@ -47,14 +40,11 @@ async def handle_overview_diagram_request(
         "mermaidDefinition", "graph TD;\n    A[会議開始];")
     existing_title = overview_diagram_obj.get("title", "概要図")
 
-    if not VERTEX_AI_AVAILABLE or llm_model is None:
-        logger.warning(
-            "Vertex AI not available for overview diagram management or LLM model not provided.")
-        return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "概要図は更新されませんでした (Vertex AI利用不可またはLLMモデルが提供されていません)。"
+    if not model_name or not api_key:
+        logger.warning("LLM not configured for overview diagram management.")
+        return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "概要図は更新されませんでした (LLM未設定)。"
 
     try:
-        model = llm_model  # 引数で受け取ったllm_modelを使用
-
         history_str = "\n".join(
             [f"{msg.role.capitalize()}: {msg.parts[0]['text']}" for msg in conversation_history if msg.parts and msg.parts[0].get('text')])
 
@@ -179,11 +169,7 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
 
         logger.info(
             f"Sending overview diagram prompt to LLM. Instruction: {instruction}")
-        response = await model.generate_content_async(prompt)
-
-        llm_response_text = ""
-        if response.candidates and response.candidates[0].content.parts:
-            llm_response_text = response.candidates[0].content.parts[0].text
+        llm_response_text = await llm_complete(model=model_name, prompt=prompt, api_key=api_key)
 
         logger.info(f"LLM overview diagram response: {llm_response_text}")
 
@@ -203,7 +189,6 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
         if not (cleaned_response_text.startswith("graph TD") or cleaned_response_text.startswith("graph LR")):
             logger.warning(
                 f"LLM response doesn't start with 'graph TD' or 'graph LR': {cleaned_response_text[:50]}...")
-            # Try to extract from JSON if it's still in JSON format (fallback)
             try:
                 diagram_update = json.loads(cleaned_response_text)
                 if isinstance(diagram_update, dict) and "mermaid_definition" in diagram_update:
@@ -219,7 +204,6 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
                     "Response is neither valid Mermaid nor JSON, using existing definition")
                 return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM response was not in the expected Mermaid format."
 
-        # The cleaned response should now be raw Mermaid code
         new_mermaid_definition = cleaned_response_text
 
         # Post-process to clean and fix common Mermaid syntax issues
@@ -228,15 +212,11 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
             corrected_lines = []
             for line in lines:
                 stripped_line = line.lstrip()
-                # Fix single '%' comments to use '%%'
                 if stripped_line.startswith("%") and not stripped_line.startswith("%%"):
                     corrected_lines.append(line.replace(
                         stripped_line, "%%" + stripped_line[1:], 1))
-                # Remove any problematic Unicode characters in comments
                 elif stripped_line.startswith("%%"):
-                    # Keep only ASCII characters in comments to avoid parsing errors
                     comment_text = stripped_line[2:].strip()
-                    # Replace common problematic characters
                     comment_text = comment_text.encode(
                         'ascii', 'ignore').decode('ascii')
                     if comment_text:
@@ -249,11 +229,9 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
                     corrected_lines.append(line)
             new_mermaid_definition = "\n".join(corrected_lines)
 
-        # Generate a title based on the instruction or use existing
         new_title = existing_title
         if instruction and len(instruction.strip()) > 0:
-            # Create a simple title from the instruction
-            title_words = instruction.strip()[:30]  # Limit to 30 characters
+            title_words = instruction.strip()[:30]
             if len(instruction.strip()) > 30:
                 title_words += "..."
             new_title = f"概要図: {title_words}"
@@ -265,8 +243,6 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
 {new_mermaid_definition}
 ```
 """
-        # Ensure the mermaidDefinition is properly stored as a string
-        # Firebase will handle the JSON serialization automatically
         overview_diagram_data = {
             "mermaidDefinition": new_mermaid_definition,
             "title": new_title
