@@ -12,10 +12,12 @@
     "export": "cross-env NEXT_EXPORT=true next build"
   },
   "dependencies": {
+    "@google/genai": "^0.14.0",
     "@iconify-json/logos": "^1.2.4",
     "@sunwood-ai-labs/duckduckgo-web-search": "^0.1.0",
     "@xyflow/react": "^12.7.0",
     "d3": "^7.9.0",
+    "eventemitter3": "^5.0.1",
     "firebase": "^11.8.1",
     "lucide-react": "^0.511.0",
     "mermaid": "^11.6.0",

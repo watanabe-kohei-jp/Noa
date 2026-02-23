@@ -27,6 +27,9 @@ import {
   TranscriptEntry, PanelId
 } from '@/types/data';
 
+// Live API パネル
+import LivePanel from '@/components/live-panel/LivePanel';
+
 // 日付と時刻を統合して表示するコンポーネント
 const DateTimeDisplay = React.memo(() => {
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -84,6 +87,7 @@ export default function RoomPage() {
   }, [pathname, router]);
 
   const {
+    roomData,
     participants,
     notes,
     tasks,
@@ -1213,6 +1217,12 @@ export default function RoomPage() {
           </div>
         </div>
       )}
+
+      {/* Live API Panel */}
+      <LivePanel
+        roomId={roomId}
+        roomData={roomData}
+      />
     </div>
   );
 }
