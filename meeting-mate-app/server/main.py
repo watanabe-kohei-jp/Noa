@@ -582,7 +582,7 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 # /invoke endpoint
 # ================================================================
 
-@app.post("/invoke", response_model=JsonRpcResponse, summary="Invoke AIMeeBo Agent")
+@app.post("/invoke", response_model=JsonRpcResponse, summary="Invoke Noa Agent")
 async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTasks):
     if request.method != "ExecuteTask":
         return JsonRpcResponse(error={"code": -32601, "message": "Method not found"}, id=request.id)

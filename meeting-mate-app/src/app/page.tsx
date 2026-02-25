@@ -125,7 +125,7 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-slate-100 overflow-x-hidden w-screen max-w-full">
       <div className="max-w-lg w-full box-border p-8 bg-white rounded-lg shadow-xl overflow-x-auto">
-        <h1 className="text-3xl font-bold text-center text-slate-800 mb-8">AIMeeBo</h1>
+        <h1 className="text-3xl font-bold text-center text-slate-800 mb-8">Noa</h1>
 
         {error && <p className="text-red-500 text-center mb-4 bg-red-100 p-3 rounded-md">{error}</p>}
 

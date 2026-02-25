@@ -69,8 +69,8 @@ function LivePanelInner({
 
       const transcriptRef = ref(db, `sessions/${roomId}/transcript`);
       push(transcriptRef, {
-        userId: role === "ai" ? "aimeebo-live" : "live-user",
-        userName: role === "ai" ? "AIMeeBo (Live)" : "Live User",
+        userId: role === "ai" ? "noa-live" : "live-user",
+        userName: role === "ai" ? "Noa (Live)" : "Live User",
         text: text.trim(),
         timestamp: new Date().toISOString(),
         role,

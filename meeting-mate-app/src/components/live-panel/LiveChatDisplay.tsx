@@ -42,7 +42,7 @@ export default function LiveChatDisplay({ messages }: LiveChatDisplayProps) {
             }`}
           >
             <div className="text-xs opacity-60 mb-0.5">
-              {msg.role === "user" ? "あなた" : "AIMeeBo"}
+              {msg.role === "user" ? "あなた" : "Noa"}
             </div>
             <div className="whitespace-pre-wrap">{msg.text}</div>
           </div>

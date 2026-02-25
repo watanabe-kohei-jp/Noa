@@ -7,7 +7,7 @@ load_dotenv()
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("meeting_mate_server")
+logger = logging.getLogger("noa_server")
 
 # ============================================================
 # マルチプロバイダー LLM 設定

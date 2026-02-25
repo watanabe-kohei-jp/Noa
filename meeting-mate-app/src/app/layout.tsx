@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AIMeeBo", // タイトルを変更
+  title: "Noa",
   description: "Real-time meeting assistant app", // 説明を変更
 };
 

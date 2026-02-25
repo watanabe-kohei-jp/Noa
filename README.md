@@ -1,8 +1,8 @@
-# 📝 リアルタイム議事録生成アプリ「AI Meeting Board」（愛称：AIMeeBo）
+# 📝 リアルタイム会議AIアシスタント「Noa」
 
 ## 📌 概要
 
-本アプリは、**ユーザーのテキスト入力または音声入力をトリガーとして、LLM（Vertex AI Gemini）を用いてリアルタイムに会議情報（タスク、参加者、ノート、議題、概要図）を生成・更新し、表示するNext.jsベースのウェブアプリケーション**です。Firebase Realtime Database を活用したSPA（Single Page Application）として構築されており、データのリアルタイム同期とサーバーレスアーキテクチャにこだわっています。愛称の「AIMeeBo」は「あいみーぼ」と読みます。
+本アプリは、**ユーザーのテキスト入力または音声入力をトリガーとして、LLM（Vertex AI Gemini）を用いてリアルタイムに会議情報（タスク、参加者、ノート、議題、概要図）を生成・更新し、表示するNext.jsベースのウェブアプリケーション**です。Firebase Realtime Database を活用したSPA（Single Page Application）として構築されており、データのリアルタイム同期とサーバーレスアーキテクチャにこだわっています。「Noa」は Know + AI に由来し、知識を届けるAI会議参加者を表します。
 
 「今日の会議の議事録、誰が書く？」「あのタスク、誰が担当するんだっけ？」「議論に集中したいのに、メモを取るのに必死で話が頭に入ってこない…」といった会議の「見えないコスト」を、AIの力で解消することを目指しています。
 
@@ -20,7 +20,7 @@
 *   Vertex AI (Gemini) と Firebase を組み合わせたサーバーレス・リアルタイムアーキテクチャの実現。
 
 ## 🏗️ アーキテクチャ概要
-![AIMeeBoアーキテクチャ](docs/AIMeeBoアーキテクチャ.png)
+![Noaアーキテクチャ](docs/Noaアーキテクチャ.png)
 
 
 ```
@@ -500,6 +500,14 @@ Terraform関連のファイル (`environments/` ディレクトリ) にデプロ
 ### iPad
 - Chrome: 不可
 - Safari: 可
+
+## 名前の変更について
+
+本プロジェクトは元々 [marcosanyo/AIMeeBo](https://github.com/marcosanyo/AIMeeBo)（AI Meeting Board、愛称「あいみーぼ」）をベースに開発を開始しました。
+
+Gemini Multimodal Live API の統合により、AIが会議中にリアルタイムで音声・映像を理解し、質問に即座に回答する「会議の参加者」へと進化したことを機に、プロジェクトの独自性を反映する新しい名前 **Noa** に改名しました（2025年2月）。
+
+**Noa** の由来: **Know + AI** — 知識を届けるAI会議参加者。
 
 ## 補記
 - このDevcontainer環境は下記をベースに作成しました。感謝申し上げます。
