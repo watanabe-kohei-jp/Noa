@@ -91,6 +91,7 @@ bun.lock
 sa-*.json
 *-key.json
 *-credentials.json
+*-firebase-adminsdk-*.json
 
 # Firebase プロジェクト固有設定
 **/.firebaserc
@@ -116,3 +117,6 @@ logs/
 tmp/
 temp/
 .tmp/
+
+# Claude Code
+.claude/
