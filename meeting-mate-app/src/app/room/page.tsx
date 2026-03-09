@@ -1,17 +1,18 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback, Fragment } from 'react';
-import { Users, MessageSquare, Clock, LogOut, X, User, Send, Sun, Moon, Palette, Mic, Plus, Eye, Volume2, VolumeX} from 'lucide-react';
+import { Users, Clock, LogOut, X, User, Send, Sun, Moon, Palette, Mic, Plus, Eye, Volume2, VolumeX} from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import Link from 'next/link';
 
 // カスタムフックのインポート
 import { useRoomData } from '@/hooks/useRoomData';
-import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
-import { useBackendSTT } from '@/hooks/useBackendSTT';
 import { useBackendTTS } from '@/hooks/useBackendTTS';
 import { useBackendApi } from '@/hooks/useBackendApi';
 import { useFlashMessages } from '@/hooks/useFlashMessages';
+import { useSharedAudioStream } from '@/hooks/useSharedAudioStream';
+import { useStreamingSTT } from '@/hooks/useStreamingSTT';
+import { useTranscriptManager } from '@/hooks/useTranscriptManager';
 
 // 定数と型定義のインポート
 import { MAX_COLS, MIN_COL_WIDTH } from '@/constants/layout';
@@ -20,6 +21,7 @@ import { themes } from '@/constants/themes';
 import { getPanelConfig } from '@/app/room/constants/panelConfig';
 import Panel from '@/app/room/components/Panel';
 import OverviewDiagramPanel from '@/app/room/components/OverviewDiagramPanel';
+import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import { participantColors, getParticipantColorIndex } from '@/app/room/components/ParticipantsList';
 
 // 型定義とユーティリティ関数のインポート
@@ -29,6 +31,8 @@ import {
 
 // Live API パネル
 import LivePanel from '@/components/live-panel/LivePanel';
+import SpeakerMappingPanel from '@/components/SpeakerMappingPanel';
+import SessionSelector from '@/components/SessionSelector';
 
 // 日付と時刻を統合して表示するコンポーネント
 const DateTimeDisplay = React.memo(() => {
@@ -60,14 +64,10 @@ export default function RoomPage() {
   const pathname = usePathname();
   const { currentUser, loading, logout } = useAuth();
   const [message, setMessage] = useState('');
-  const [isChatVisible, setIsChatVisible] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
   const [chatHistory, setChatHistory] = useState<Array<{ id: number; user: string; avatar: string; message: string; timestamp: string; type: 'chat' | 'system'; userId?: string }>>([]);
-  const [unreadMessageCount, setUnreadMessageCount] = useState(0); // 未読メッセージ数
   const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'modern'>('light'); // デフォルトはライトテーマ
   const [modalContent, setModalContent] = useState<{ title: string; children: React.ReactNode; panelId?: PanelId } | null>(null);
   const [processingAgents, setProcessingAgents] = useState<string[]>([]); // 処理中のエージェント名
-  const [sttMode, setSttMode] = useState<'browser' | 'backend'>('browser'); // STT モード
 
   // クライアントサイドでroomIdを取得
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -97,9 +97,15 @@ export default function RoomPage() {
   projectSubtitle,
   overviewDiagramData,
   pageCurrentUser,
-    transcript, // ここにtranscriptを追加
+    transcript,
     apiKeyExpiresAt,
     // apiKeyDurationHours, // 将来的に使用予定
+    speakerMap,
+    sessions,
+    currentSessionId,
+    createSession,
+    switchSession,
+    endSession,
   } = useRoomData(roomId);
 
   // ヘルパー関数: userNameから表示名を生成
@@ -181,105 +187,97 @@ export default function RoomPage() {
         userId: t.userId // userIdを追加
       }));
       setChatHistory(newChatHistory);
-      // チャットパネルが非表示の場合に未読数を増やす
-      if (!isChatVisible && newChatHistory.length > chatHistory.length) {
-        setUnreadMessageCount(prev => prev + (newChatHistory.length - chatHistory.length));
-      }
     }
-  }, [transcript, getDisplayName, isChatVisible, chatHistory.length]);
-
-  // チャットパネルが表示されたら未読数をリセットし、最新メッセージへスクロール
-  useEffect(() => {
-    if (isChatVisible) {
-      setUnreadMessageCount(0);
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [isChatVisible]);
-
-  // chatHistoryが更新されたら最新メッセージへスクロール (チャットパネル表示時のみ)
-  useEffect(() => {
-    if (isChatVisible) {
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [chatHistory, isChatVisible]);
+  }, [transcript, getDisplayName]);
 
   const currentRoomId = roomId;
   const { callBackendApi } = useBackendApi();
   const { triggerFlash } = useFlashMessages();
 
-  // handleSpeechResult関数を先に定義
-  const handleSpeechResult = useCallback(async (finalTranscript: string) => {
-    if (finalTranscript && pageCurrentUser && currentRoomId) {
+  // Streaming STT (話者分離リアルタイム)
+  const { stream: sharedStream, startMic, stopMic } = useSharedAudioStream();
+
+  const { addSTTResult } = useTranscriptManager({
+    roomId: currentRoomId,
+    sessionId: currentSessionId,
+    speakerMap,
+  });
+
+  // Streaming STT の final 結果を処理: Firebase書き込み + AI分析トリガー
+  const handleStreamingSTTFinal = useCallback(async (result: import('@/hooks/useStreamingSTT').STTResult) => {
+    // 1) Firebase にトランスクリプトを書き込み
+    addSTTResult(result);
+
+    // 2) AI分析をトリガー (/invoke)
+    if (!pageCurrentUser || !currentRoomId) return;
+
+    const segments = (result.segments && result.segments.length > 0)
+      ? result.segments
+      : [{ speakerTag: result.speakerTag, text: result.text, startTime: result.startTime, endTime: result.endTime ?? 0 }];
+
+    for (const seg of segments) {
+      if (!seg.text.trim()) continue;
+      const speakerLabel = speakerMap[`speaker_${seg.speakerTag}`]?.label ?? `話者 ${seg.speakerTag}`;
       const newEntry: TranscriptEntry = {
-        userId: pageCurrentUser.id,
-        userName: pageCurrentUser.name,
-        text: finalTranscript,
-        timestamp: new Date().toISOString(), // ISO形式に変更
-        role: "user" // ユーザー発言なので'user'を設定
+        userId: `speaker_${seg.speakerTag}`,
+        userName: speakerLabel,
+        text: seg.text.trim(),
+        timestamp: new Date().toISOString(),
+        role: "user",
+        speakerTag: seg.speakerTag,
+        speakerLabel,
       };
 
       try {
-        const backendResponse = await callBackendApi(newEntry, currentRoomId, pageCurrentUser);
+        const backendResponse = await callBackendApi(newEntry, currentRoomId, pageCurrentUser, currentSessionId);
         if (backendResponse && backendResponse.result) {
-          const { result } = backendResponse;
-          if (result.invokedAgents) setProcessingAgents(result.invokedAgents);
-          if (result.updatedTasks) triggerFlash('issues');
-          if (result.updatedParticipants) triggerFlash('participants');
-          if (result.updatedMinutes) triggerFlash('tasks_minutes');
-          if (result.updatedAgenda) {
-            if (result.updatedAgenda.currentAgenda?.mainTopic) triggerFlash('currentTopic');
-            if (result.updatedAgenda.suggestedNextTopics) triggerFlash('suggestedNextTopic');
+          const { result: apiResult } = backendResponse;
+          if (apiResult.invokedAgents) setProcessingAgents(apiResult.invokedAgents);
+          if (apiResult.updatedTasks) triggerFlash('issues');
+          if (apiResult.updatedParticipants) triggerFlash('participants');
+          if (apiResult.updatedMinutes) triggerFlash('tasks_minutes');
+          if (apiResult.updatedAgenda) {
+            if (apiResult.updatedAgenda.currentAgenda?.mainTopic) triggerFlash('currentTopic');
+            if (apiResult.updatedAgenda.suggestedNextTopics) triggerFlash('suggestedNextTopic');
           }
-          if (result.updatedOverviewDiagram) triggerFlash('overviewDiagram');
+          if (apiResult.updatedOverviewDiagram) triggerFlash('overviewDiagram');
         }
       } catch (apiError: Error | unknown) {
-        console.error("Error sending speech transcript to backend:", apiError);
-
-        // エラーメッセージをチャット履歴に追加
-        const errorMessage = apiError instanceof Error ? apiError.message : "バックエンドとの通信中にエラーが発生しました";
-        const systemErrorEntry = {
-          id: Date.now(),
-          user: "システム",
-          avatar: "SYS",
-          message: `エラー: ${errorMessage}`,
-          timestamp: new Date().toISOString(),
-          type: 'system' as const,
-          userId: "system"
-        };
-
-        setChatHistory(prev => [...prev, systemErrorEntry]);
-        if (!isChatVisible) {
-          setUnreadMessageCount(prev => prev + 1);
-        }
+        console.error("Error sending streaming STT transcript to backend:", apiError);
       } finally {
         setTimeout(() => setProcessingAgents([]), 1000);
       }
     }
-  }, [callBackendApi, currentRoomId, pageCurrentUser, triggerFlash, isChatVisible]);
+  }, [addSTTResult, callBackendApi, currentRoomId, currentSessionId, pageCurrentUser, speakerMap, triggerFlash]);
 
-  const { isRecording, isSpeechApiAvailable, toggleSpeechRecognition } = useSpeechRecognition({
-    onResult: handleSpeechResult,
-    onError: (error) => {
-      console.error('Speech recognition error:', error);
-    },
-    onEnd: () => {
-      console.log('Speech recognition ended');
-    },
-  });
-
-  // バックエンドSTT
   const {
-    isRecording: isBackendRecording,
-    isAvailable: isBackendSTTAvailable,
-    toggleRecording: toggleBackendRecording,
-  } = useBackendSTT({
+    startSTT: startStreamingSTT,
+    stopSTT: stopStreamingSTT,
+    isConnected: isStreamingConnected,
+    isStreaming: isStreamingActive,
+  } = useStreamingSTT({
+    stream: sharedStream,
     roomId: currentRoomId,
     language: 'ja',
-    onResult: handleSpeechResult,
-    onError: (error) => {
-      console.error('Backend STT error:', error);
+    minSpeakers: 2,
+    maxSpeakers: 6,
+    onFinal: handleStreamingSTTFinal,
+    onError: (msg) => {
+      console.error('Streaming STT error:', msg);
     },
   });
+
+  // Streaming STT の開始/停止ハンドラ
+  const toggleStreamingSTT = useCallback(async () => {
+    if (isStreamingActive) {
+      stopStreamingSTT();
+      stopMic();
+    } else {
+      // startMic → stream state 更新 → useStreamingSTT の pendingStart で自動接続
+      await startMic();
+      startStreamingSTT();
+    }
+  }, [isStreamingActive, startStreamingSTT, stopStreamingSTT, startMic, stopMic]);
 
   // バックエンドTTS
   const {
@@ -292,10 +290,18 @@ export default function RoomPage() {
     language: 'ja',
   });
 
-  // 統合されたSTT状態
-  const isCurrentlyRecording = sttMode === 'browser' ? isRecording : isBackendRecording;
-  const isSTTAvailable = sttMode === 'browser' ? isSpeechApiAvailable : isBackendSTTAvailable;
-  const handleToggleRecording = sttMode === 'browser' ? toggleSpeechRecognition : toggleBackendRecording;
+  // STT状態（Streaming STT固定）
+  const isCurrentlyRecording = isStreamingActive;
+  const handleToggleRecording = toggleStreamingSTT;
+
+  // トランスクリプトから検出された話者タグを収集
+  const detectedSpeakers = React.useMemo(() => {
+    const tags = new Set<number>();
+    transcript.forEach(t => {
+      if (t.speakerTag && t.speakerTag > 0) tags.add(t.speakerTag);
+    });
+    return Array.from(tags);
+  }, [transcript]);
 
   // Pinterest風レイアウト用の状態
   const [cols, setCols] = useState<PanelId[][]>([
@@ -317,34 +323,6 @@ export default function RoomPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const ghostRef = useRef<HTMLElement | null>(null);
 
-  const [chatPanelPosition, setChatPanelPosition] = useState({ x: 0, y: 0, offsetX: 0, offsetY: 0 });
-  const [isDraggingChatPanel, setIsDraggingChatPanel] = useState(false);
-  const chatPanelRef = useRef<HTMLDivElement>(null);
-  const messageSquareButtonRef = useRef<HTMLButtonElement>(null);
-
-  // チャットパネルの初期位置を設定
-  useEffect(() => {
-    if (isChatVisible && messageSquareButtonRef.current && chatPanelRef.current) {
-      const buttonRect = messageSquareButtonRef.current.getBoundingClientRect();
-      const panelWidth = chatPanelRef.current.offsetWidth;
-      const panelHeight = chatPanelRef.current.offsetHeight;
-
-      // ボタンの左端に合わせ、ボタンの上端からパネルの高さ分上に配置
-      const newX = buttonRect.left;
-      const newY = buttonRect.top - panelHeight - 10; // 10pxは余白
-
-      // 画面外にはみ出さないように調整
-      const boundedX = Math.max(0, Math.min(newX, window.innerWidth - panelWidth));
-      const boundedY = Math.min(Math.max(0, newY), window.innerHeight - panelHeight);
-
-      setChatPanelPosition({
-        x: boundedX,
-        y: boundedY,
-        offsetX: 0, // 初期位置設定時はオフセットは0
-        offsetY: 0,
-      });
-    }
-  }, [isChatVisible]);
 
   const selectedTheme = themes[currentTheme];
 
@@ -775,38 +753,6 @@ export default function RoomPage() {
   }, [logout, router]);
 
 
-  const handleChatPanelMouseDown = useCallback((e: React.MouseEvent) => {
-    if (chatPanelRef.current) {
-      setIsDraggingChatPanel(true);
-      const rect = chatPanelRef.current.getBoundingClientRect();
-      setChatPanelPosition({
-        x: rect.left,
-        y: rect.top,
-        offsetX: e.clientX - rect.left,
-        offsetY: e.clientY - rect.top,
-      });
-    }
-  }, []);
-
-  const handleChatPanelMouseMove = useCallback((e: MouseEvent) => {
-    if (isDraggingChatPanel && chatPanelRef.current) {
-      const newX = e.clientX - chatPanelPosition.offsetX;
-      const newY = e.clientY - chatPanelPosition.offsetY;
-
-      const maxX = window.innerWidth - chatPanelRef.current.offsetWidth;
-      const maxY = window.innerHeight - chatPanelRef.current.offsetHeight;
-
-      const boundedX = Math.min(Math.max(0, newX), maxX);
-      const boundedY = Math.min(Math.max(0, newY), maxY);
-
-      chatPanelRef.current.style.left = `${boundedX}px`;
-      chatPanelRef.current.style.top = `${boundedY}px`;
-    }
-  }, [isDraggingChatPanel, chatPanelPosition]);
-
-  const handleChatPanelMouseUp = useCallback(() => {
-    setIsDraggingChatPanel(false);
-  }, []);
 
   const handleSendMessage = useCallback(async () => {
     if (message.trim() && pageCurrentUser && currentRoomId) {
@@ -820,7 +766,7 @@ export default function RoomPage() {
       triggerFlash('transcript');
       setProcessingAgents([]);
       try {
-        const backendResponse = await callBackendApi(newEntry, currentRoomId, pageCurrentUser);
+        const backendResponse = await callBackendApi(newEntry, currentRoomId, pageCurrentUser, currentSessionId);
         if (backendResponse && backendResponse.result) {
           const { result } = backendResponse;
           if (result.invokedAgents) setProcessingAgents(result.invokedAgents);
@@ -849,15 +795,12 @@ export default function RoomPage() {
         };
 
         setChatHistory(prev => [...prev, systemErrorEntry]);
-        if (!isChatVisible) {
-          setUnreadMessageCount(prev => prev + 1);
-        }
       } finally {
         setTimeout(() => setProcessingAgents([]), 1000);
       }
       setMessage('');
     }
-  }, [message, pageCurrentUser, currentRoomId, callBackendApi, triggerFlash, isChatVisible]);
+  }, [message, pageCurrentUser, currentRoomId, callBackendApi, triggerFlash]);
 
   const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -866,21 +809,6 @@ export default function RoomPage() {
     }
   }, [handleSendMessage]);
 
-  // Mouse move/up listeners for chat panel dragging
-  useEffect(() => {
-    if (isDraggingChatPanel) {
-      const handleMouseMove = (e: MouseEvent) => handleChatPanelMouseMove(e);
-      const handleMouseUp = () => handleChatPanelMouseUp();
-
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-
-      return () => {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-      };
-    }
-  }, [isDraggingChatPanel, handleChatPanelMouseMove, handleChatPanelMouseUp]);
 
   // Show loading screen while authentication is being checked
   if (loading) {
@@ -993,50 +921,6 @@ export default function RoomPage() {
         {screenSize === 'small' ? renderMobile() : renderDesktop()}
       </main>
 
-      {/* Chat Panel */}
-      {isChatVisible && (
-        <div
-          ref={chatPanelRef}
-          className="fixed w-full max-w-md z-30"
-          style={{
-            left: chatPanelPosition.x,
-            top: chatPanelPosition.y,
-            cursor: isDraggingChatPanel ? 'grabbing' : 'grab',
-          }}
-          onMouseDown={handleChatPanelMouseDown}
-        >
-          <div className={`${currentTheme === 'light' ? 'bg-white' : 'bg-gray-900'} rounded-2xl border ${currentTheme === 'light' ? 'border-gray-200' : 'border-white/20'} flex flex-col max-h-[40vh]`}>
-            <div className={`flex items-center justify-between p-3 border-b ${selectedTheme.cardInner}`}>
-              <h3 className={`${selectedTheme.text.primary} font-semibold flex items-center space-x-2`}><MessageSquare className="w-5 h-5"/><span>会話履歴</span></h3>
-              <button onClick={() => setIsChatVisible(false)} className={`p-1 rounded-full ${currentTheme === 'light' ? 'hover:bg-gray-200' : 'hover:bg-white/10'}`}><X className="w-5 h-5"/></button>
-            </div>
-            <div className="p-4 space-y-4 overflow-y-auto max-h-[70vh]">
-              {chatHistory.map((chat) => {
-                // システムメッセージはグレー、ユーザーメッセージは参加者パネルと同じ色のグラデーション
-
-                const bgColor = chat.type === 'system'
-                  ? 'bg-gray-500'
-                  : `bg-gradient-to-r ${participantColors[getParticipantColorIndex(chat.userId || chat.user)]}`;
-
-                return (
-                  <div key={chat.id} className={`flex items-start space-x-3 text-sm`}>
-                    <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-white font-semibold text-xs ${bgColor}`}>{chat.avatar}</div>
-                    <div className="flex-1">
-                      <div className="flex items-baseline space-x-2 mb-1">
-                        <p className={`${selectedTheme.text.primary} font-medium`}>{chat.type === 'system' ? 'AI Assistant' : chat.user}</p>
-                        <p className={`${selectedTheme.text.muted} text-xs`}>{chat.timestamp}</p>
-                      </div>
-                      <p className={`${selectedTheme.text.secondary} leading-relaxed`}>{chat.message}</p>
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={chatEndRef} />
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Fixed Bottom Input Bar */}
       <div className={`fixed bottom-0 left-0 right-0 ${selectedTheme.header} border-t z-20`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3">
@@ -1066,22 +950,31 @@ export default function RoomPage() {
 
             {/* Action Buttons */}
             <div className="flex items-center space-x-2">
-              {/* STT モード切替 */}
-              <button
-                onClick={() => setSttMode(prev => prev === 'browser' ? 'backend' : 'browser')}
-                className={`px-2 py-1 rounded-lg text-xs transition-all border ${
-                  sttMode === 'backend'
-                    ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
-                    : `${selectedTheme.cardInner} ${selectedTheme.text.secondary}`
-                }`}
-                title={sttMode === 'browser' ? 'ブラウザSTT (切替)' : 'バックエンドSTT (切替)'}
-              >
-                {sttMode === 'browser' ? 'STT:Br' : 'STT:API'}
-              </button>
-              {/* マイクボタン */}
-              <button onClick={() => handleToggleRecording()} className={`p-3 rounded-xl transition-all ${isCurrentlyRecording ? 'bg-red-500 text-white animate-pulse' : `${selectedTheme.button.secondary} text-white`}`} disabled={!isSTTAvailable}>
+              {/* セッション選択 */}
+              <SessionSelector
+                sessions={sessions}
+                currentSessionId={currentSessionId}
+                onCreateSession={createSession}
+                onSwitchSession={switchSession}
+                onEndSession={endSession}
+              />
+              {/* Streaming 接続状態 */}
+              {isStreamingConnected && (
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" title="gRPC接続中" />
+              )}
+              {/* マイクボタン (Streaming STT) */}
+              <button onClick={() => handleToggleRecording()} className={`p-3 rounded-xl transition-all ${isCurrentlyRecording ? 'bg-red-500 text-white animate-pulse' : `${selectedTheme.button.secondary} text-white`}`}>
                 <Mic className="w-5 h-5" />
               </button>
+              {/* Live AI コントロール (インライン) */}
+              <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-1" />
+              <LivePanel
+                roomId={roomId}
+                roomData={roomData}
+                sharedStream={sharedStream}
+                currentSessionId={currentSessionId}
+              />
+              <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-1" />
               {/* TTS再生/停止ボタン */}
               {isTTSAvailable && (
                 <button
@@ -1102,14 +995,6 @@ export default function RoomPage() {
                   {isSpeaking ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                 </button>
               )}
-              <button ref={messageSquareButtonRef} onClick={() => setIsChatVisible(!isChatVisible)} className={`relative p-3 rounded-xl transition-colors border ${selectedTheme.cardInner}`}>
-                <MessageSquare className="w-5 h-5" />
-                {unreadMessageCount > 0 && (
-                  <span className="absolute top-0 right-0 -mt-1 -mr-1 bg-red-500 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">
-                    {unreadMessageCount}
-                  </span>
-                )}
-              </button>
             </div>
           </div>
         </div>
@@ -1143,35 +1028,8 @@ export default function RoomPage() {
                   isFullScreen={true}
                 />
               ) : modalContent.panelId === 'conversationHistory' ? (
-                <div className="h-full p-4">
-                  <div className="h-full overflow-y-auto space-y-4">
-                    {chatHistory.map((chat) => {
-                      // システムメッセージはグレー、ユーザーメッセージは参加者パネルと同じ色のグラデーション
-                      const bgColor = chat.type === 'system'
-                        ? 'bg-gray-500'
-                        : `bg-gradient-to-r ${participantColors[getParticipantColorIndex(chat.userId || chat.user)]}`;
-
-                      return (
-                        <div key={chat.id} className="flex items-start space-x-3 text-sm">
-                          <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-white font-semibold text-xs ${bgColor}`}>
-                            {chat.avatar}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center space-x-2 mb-1">
-                              <span className={`font-medium ${selectedTheme.text.primary}`}>{chat.user}</span>
-                              <span className={`text-xs ${selectedTheme.text.tertiary}`}>
-                                {new Date(chat.timestamp).toLocaleTimeString('ja-JP', {
-                                  hour: '2-digit',
-                                  minute: '2-digit'
-                                })}
-                              </span>
-                            </div>
-                            <p className={`${selectedTheme.text.secondary} break-words`}>{chat.message}</p>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                <div className="h-full p-4 overflow-y-auto">
+                  <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={selectedTheme} />
                 </div>
               ) : modalContent.panelId === 'participants' ? (
                 <div className="h-full p-4">
@@ -1218,11 +1076,16 @@ export default function RoomPage() {
         </div>
       )}
 
-      {/* Live API Panel */}
-      <LivePanel
-        roomId={roomId}
-        roomData={roomData}
-      />
+      {/* Speaker Mapping Panel (話者が検出されたら表示) */}
+      {detectedSpeakers.length > 0 && (
+        <div className="fixed left-4 bottom-24 z-30 w-56 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-lg">
+          <SpeakerMappingPanel
+            roomId={roomId}
+            speakerMap={speakerMap}
+            detectedSpeakers={detectedSpeakers}
+          />
+        </div>
+      )}
     </div>
   );
 }

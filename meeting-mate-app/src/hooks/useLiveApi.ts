@@ -27,9 +27,18 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
   const [model, setModel] = useState<string>(
     "models/gemini-2.5-flash-native-audio-preview-12-2025"
   );
-  const [config, setConfig] = useState<LiveConnectConfig>({});
+  const [config, _setConfig] = useState<LiveConnectConfig>({});
+  const configRef = useRef<LiveConnectConfig>(config);
+  const modelRef = useRef<string>(model);
   const [connected, setConnected] = useState(false);
   const [volume, setVolume] = useState(0);
+
+  // Keep refs in sync with state
+  const setConfig = useCallback((c: LiveConnectConfig) => {
+    configRef.current = c;
+    _setConfig(c);
+  }, []);
+  useEffect(() => { modelRef.current = model; }, [model]);
 
   // Initialize audio output streamer
   useEffect(() => {
@@ -76,12 +85,17 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
   }, [client]);
 
   const connect = useCallback(async () => {
-    if (!config) {
+    const currentConfig = configRef.current;
+    if (!currentConfig) {
       throw new Error("config has not been set");
     }
+    if (client.status === "connecting" || client.status === "connected") {
+      console.log("[useLiveAPI] Already connected/connecting, skipping");
+      return;
+    }
     client.disconnect();
-    await client.connect(model, config);
-  }, [client, config, model]);
+    await client.connect(modelRef.current, currentConfig);
+  }, [client]);
 
   const disconnect = useCallback(async () => {
     client.disconnect();

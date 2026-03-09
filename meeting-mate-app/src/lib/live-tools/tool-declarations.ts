@@ -1,60 +1,22 @@
 // Function Calling ツール定義 for Gemini Live API
+// delegate_to_brain メタツール 1つのみ
 import { FunctionDeclaration, Type } from "@google/genai";
 
 export const liveToolDeclarations: FunctionDeclaration[] = [
   {
-    name: "query_knowledge_base",
+    name: "delegate_to_brain",
     description:
-      "社内ナレッジベースを検索します。売上データ、社内規定、プロジェクト進捗などを検索できます。",
+      "データ検索、計算、分析、タスク登録、図生成、会議情報の確認など、情報の取得や処理が必要な場合にFunction Callingで呼び出してください。あなた自身の知識だけでは正確に答えられない質問や、ツールを使った処理が必要な場面で使います。挨拶・雑談・一般的な会話には使わないでください。ツール名を声に出さないでください。",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        query: {
+        request: {
           type: Type.STRING,
-          description: "検索クエリ。例: '去年の売上', 'リモートワーク規定', 'プロジェクトA進捗'",
-        },
-        category: {
-          type: Type.STRING,
-          description: "検索カテゴリ: sales, policies, projects, general",
+          description:
+            "ユーザーのリクエストをそのまま自然言語で記述。例: '去年の売上データを教えて', 'タスクを登録して: 田中さんが3月15日までに提案書作成', '今何時？'",
         },
       },
-      required: ["query"],
-    },
-  },
-  {
-    name: "generate_diagram",
-    description:
-      "Mermaid記法のダイアグラムを生成します。フローチャート、シーケンス図、ガントチャートなどを作成できます。",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        description: {
-          type: Type.STRING,
-          description: "生成したい図の説明。例: 'ユーザー登録のフローチャート'",
-        },
-        diagram_type: {
-          type: Type.STRING,
-          description: "図の種類: flowchart, sequence, gantt, mindmap, pie",
-        },
-      },
-      required: ["description"],
-    },
-  },
-  {
-    name: "get_meeting_context",
-    description:
-      "現在の会議情報を取得します。議題、参加者、議事録、タスクなどを確認できます。",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {},
-    },
-  },
-  {
-    name: "get_current_time",
-    description: "現在の日時を取得します。",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {},
+      required: ["request"],
     },
   },
 ];

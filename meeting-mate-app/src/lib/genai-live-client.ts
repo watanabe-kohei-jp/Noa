@@ -92,14 +92,16 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
       onclose: this.onclose,
     };
 
+    console.log("[GenAILive] Connecting...", { model, configKeys: Object.keys(config) });
     try {
       this._session = await this.client.live.connect({
         model,
         config,
         callbacks,
       });
+      console.log("[GenAILive] Session created OK");
     } catch (e) {
-      console.error("Error connecting to GenAI Live:", e);
+      console.error("[GenAILive] Connection failed:", e);
       this._status = "disconnected";
       return false;
     }
@@ -121,16 +123,19 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
   }
 
   protected onopen() {
+    console.log("[GenAILive] WebSocket opened");
     this.log("client.open", "Connected");
     this.emit("open");
   }
 
   protected onerror(e: ErrorEvent) {
+    console.error("[GenAILive] WebSocket error:", e.message);
     this.log("server.error", e.message);
     this.emit("error", e);
   }
 
   protected onclose(e: CloseEvent) {
+    console.log("[GenAILive] WebSocket closed:", e.code, e.reason);
     this.log(
       `server.close`,
       `disconnected ${e.reason ? `with reason: ${e.reason}` : ``}`
@@ -139,7 +144,10 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
   }
 
   protected async onmessage(message: LiveServerMessage) {
+    const msgKeys = Object.keys(message).filter(k => (message as Record<string, unknown>)[k] != null);
+    console.log("[GenAILive] onmessage:", msgKeys.join(", "));
     if (message.setupComplete) {
+      console.log("[GenAILive] Setup complete!");
       this.log("server.send", "setupComplete");
       this.emit("setupcomplete");
       return;

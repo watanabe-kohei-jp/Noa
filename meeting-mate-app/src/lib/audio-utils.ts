@@ -29,7 +29,8 @@ export const audioContext: (
       await a.play();
       if (options?.id && map.has(options.id)) {
         const ctx = map.get(options.id);
-        if (ctx) return ctx;
+        if (ctx && ctx.state !== "closed") return ctx;
+        map.delete(options.id);
       }
       const ctx = new AudioContext(options);
       if (options?.id) map.set(options.id, ctx);
@@ -38,7 +39,8 @@ export const audioContext: (
       await didInteract;
       if (options?.id && map.has(options.id)) {
         const ctx = map.get(options.id);
-        if (ctx) return ctx;
+        if (ctx && ctx.state !== "closed") return ctx;
+        map.delete(options.id);
       }
       const ctx = new AudioContext(options);
       if (options?.id) map.set(options.id, ctx);

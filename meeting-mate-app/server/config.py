@@ -23,6 +23,13 @@ DEFAULT_ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 DEFAULT_STT_PROVIDER = os.environ.get("DEFAULT_STT_PROVIDER", "openai")
 DEFAULT_TTS_PROVIDER = os.environ.get("DEFAULT_TTS_PROVIDER", "openai")
 
+# Brain LLM (delegate_to_brain メタツール用 - Fast Path)
+BRAIN_LLM_MODEL = os.environ.get("BRAIN_LLM_MODEL", "gemini-2.5-flash")
+
+# Deep Analysis (Supervisor パターン - Deep Path)
+ROUTER_LLM_MODEL = os.environ.get("ROUTER_LLM_MODEL", "gemini-2.5-flash")
+DEEP_ANALYSIS_MODEL = os.environ.get("DEEP_ANALYSIS_MODEL", "gemini-2.5-flash")
+
 # ============================================================
 # 後方互換: 旧 Vertex AI 設定 (非推奨)
 # ============================================================

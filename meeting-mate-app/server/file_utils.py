@@ -51,8 +51,18 @@ try:
         # ローカル開発用にフォールバックURLを設定することも可能だが、本番では環境変数設定を推奨
         # FIREBASE_DATABASE_URL = "https://your-project-id.firebaseio.com" # 例
 
-    # credentials.ApplicationDefault() は GOOGLE_APPLICATION_CREDENTIALS を自動で探す
-    cred = credentials.ApplicationDefault()
+    # クレデンシャルファイルのパスを解決 (CWDに依存しない)
+    _cred_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    _server_dir = os.path.dirname(os.path.abspath(__file__))
+    _cred_fallback = os.path.join(_server_dir, "aimeebo-firebase-adminsdk-fbsvc-66b668e015.json")
+
+    if _cred_env and os.path.isfile(_cred_env):
+        cred = credentials.Certificate(_cred_env)
+    elif os.path.isfile(_cred_fallback):
+        cred = credentials.Certificate(_cred_fallback)
+    else:
+        cred = credentials.ApplicationDefault()
+
     firebase_admin.initialize_app(cred, {
         'databaseURL': FIREBASE_DATABASE_URL
     })

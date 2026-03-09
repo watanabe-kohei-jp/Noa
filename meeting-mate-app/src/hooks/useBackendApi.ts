@@ -17,11 +17,11 @@ interface BackendApiResponse {
 }
 
 interface UseBackendApiResult {
-  callBackendApi: (newestEntry: TranscriptEntry, currentRoomId: string, pageCurrentUser: { id: string; name: string } | null) => Promise<BackendApiResponse>;
+  callBackendApi: (newestEntry: TranscriptEntry, currentRoomId: string, pageCurrentUser: { id: string; name: string } | null, sessionId?: string | null) => Promise<BackendApiResponse>;
 }
 
 export const useBackendApi = (): UseBackendApiResult => {
-  const callBackendApi = useCallback(async (newestEntry: TranscriptEntry, currentRoomId: string, pageCurrentUser: { id: string; name: string } | null) => {
+  const callBackendApi = useCallback(async (newestEntry: TranscriptEntry, currentRoomId: string, pageCurrentUser: { id: string; name: string } | null, sessionId?: string | null) => {
     if (!currentRoomId || !pageCurrentUser) {
       throw new Error("Room ID or User not available for API call");
     }
@@ -33,8 +33,9 @@ export const useBackendApi = (): UseBackendApiResult => {
           taskId: generateUniqueId(),
           messages: [{ role: "user", parts: [{ text: newestEntry.text }] }],
           roomId: currentRoomId,
-          speakerId: newestEntry.userId, // userIdを追加
-          speakerName: newestEntry.userName || newestEntry.userId // userNameを優先し、なければuserIdを使用
+          sessionId: sessionId || null,
+          speakerId: newestEntry.userId,
+          speakerName: newestEntry.userName || newestEntry.userId
         }
       },
       id: generateUniqueId()

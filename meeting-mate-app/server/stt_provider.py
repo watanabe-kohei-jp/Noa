@@ -1,11 +1,12 @@
 """
 STT (Speech-to-Text) プロバイダー抽象レイヤー
 OpenAI Whisper / Google Cloud Speech-to-Text に対応
+話者分離 (Speaker Diarization) は Google Cloud Speech-to-Text v2 で対応
 """
 
 import io
 import logging
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -159,3 +160,164 @@ class STTProvider:
         transcript = " ".join(transcript_parts).strip()
         logger.info(f"Google STT result length: {len(transcript)} chars")
         return transcript
+
+    # ================================================================
+    # 話者分離 (Speaker Diarization) — Google Cloud Speech-to-Text v2
+    # ================================================================
+
+    @staticmethod
+    def _get_bcp47(language: str) -> str:
+        """言語コードを BCP-47 形式に変換"""
+        lang_map = {
+            "ja": "ja-JP",
+            "en": "en-US",
+            "zh": "zh-CN",
+            "ko": "ko-KR",
+            "fr": "fr-FR",
+            "de": "de-DE",
+            "es": "es-ES",
+        }
+        return lang_map.get(language[:2], f"{language[:2]}-{language[:2].upper()}")
+
+    @staticmethod
+    async def transcribe_with_diarization(
+        audio_data: bytes,
+        credentials_path: str,
+        language: str = "ja",
+        mime_type: str = "audio/webm",
+        min_speakers: int = 2,
+        max_speakers: int = 6,
+    ) -> Dict[str, Any]:
+        """
+        話者分離付き文字起こし (Google Cloud Speech-to-Text v2)
+
+        Returns:
+            {
+                "text": "全体テキスト",
+                "segments": [{"speaker_tag": 1, "text": "...", "start_time": 0.0, "end_time": 1.5}, ...],
+                "provider": "google_v2_diarized"
+            }
+        """
+        return await STTProvider._transcribe_google_v2_diarized(
+            audio_data, credentials_path, language, mime_type,
+            min_speakers, max_speakers
+        )
+
+    @staticmethod
+    async def _transcribe_google_v2_diarized(
+        audio_data: bytes,
+        credentials_path: str,
+        language: str,
+        mime_type: str,
+        min_speakers: int,
+        max_speakers: int,
+    ) -> Dict[str, Any]:
+        """Google Cloud Speech-to-Text v2 API による話者分離付き文字起こし"""
+        import asyncio
+        from google.cloud.speech_v2 import SpeechClient
+        from google.cloud.speech_v2.types import cloud_speech as types
+        from google.oauth2 import service_account
+
+        # Service Account 認証
+        creds = service_account.Credentials.from_service_account_file(
+            credentials_path
+        )
+        project_id = creds.project_id
+
+        bcp47_lang = STTProvider._get_bcp47(language)
+
+        logger.info(
+            f"Google STT v2 diarized: language={bcp47_lang}, "
+            f"speakers={min_speakers}-{max_speakers}, "
+            f"audio_size={len(audio_data)} bytes"
+        )
+
+        # 話者分離設定
+        diarization_config = types.SpeakerDiarizationConfig(
+            min_speaker_count=min_speakers,
+            max_speaker_count=min(max_speakers, 6),
+        )
+
+        features = types.RecognitionFeatures(
+            diarization_config=diarization_config,
+            enable_automatic_punctuation=True,
+            enable_word_time_offsets=True,
+        )
+
+        config = types.RecognitionConfig(
+            auto_decoding_config=types.AutoDetectDecodingConfig(),
+            language_codes=[bcp47_lang],
+            model="long",
+            features=features,
+        )
+
+        request = types.RecognizeRequest(
+            recognizer=f"projects/{project_id}/locations/global/recognizers/_",
+            config=config,
+            content=audio_data,
+        )
+
+        # 同期 API を asyncio で非同期実行
+        loop = asyncio.get_event_loop()
+        client = SpeechClient(credentials=creds)
+        response = await loop.run_in_executor(None, client.recognize, request)
+
+        # レスポンスから話者別セグメントを構築
+        segments: List[Dict[str, Any]] = []
+        full_text_parts: List[str] = []
+
+        for result in response.results:
+            if not result.alternatives:
+                continue
+            alt = result.alternatives[0]
+            full_text_parts.append(alt.transcript)
+
+            # words に speaker_tag が含まれる
+            if not alt.words:
+                continue
+
+            current_speaker: Optional[int] = None
+            current_words: List[str] = []
+            current_start: Optional[float] = None
+
+            for word_info in alt.words:
+                tag = word_info.speaker_tag
+                word_start = word_info.start_offset.total_seconds() if word_info.start_offset else 0.0
+                word_end = word_info.end_offset.total_seconds() if word_info.end_offset else 0.0
+
+                if tag != current_speaker:
+                    # 話者が変わった → 前のセグメントを保存
+                    if current_speaker is not None and current_words:
+                        segments.append({
+                            "speaker_tag": current_speaker,
+                            "text": "".join(current_words),
+                            "start_time": current_start,
+                            "end_time": word_start,
+                        })
+                    current_speaker = tag
+                    current_words = [word_info.word]
+                    current_start = word_start
+                else:
+                    current_words.append(word_info.word)
+
+            # 最後のセグメント
+            if current_speaker is not None and current_words:
+                last_end = alt.words[-1].end_offset.total_seconds() if alt.words[-1].end_offset else 0.0
+                segments.append({
+                    "speaker_tag": current_speaker,
+                    "text": "".join(current_words),
+                    "start_time": current_start,
+                    "end_time": last_end,
+                })
+
+        full_text = "".join(full_text_parts).strip()
+        logger.info(
+            f"Google STT v2 diarized result: {len(full_text)} chars, "
+            f"{len(segments)} segments"
+        )
+
+        return {
+            "text": full_text,
+            "segments": segments,
+            "provider": "google_v2_diarized",
+        }

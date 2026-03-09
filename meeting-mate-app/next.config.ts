@@ -1,5 +1,8 @@
 import type { NextConfig } from "next";
 
+const BACKEND_PORT = process.env.BACKEND_PORT || '8000';
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+
 const nextConfig: NextConfig = {
   // 本番ビルド時のみ静的エクスポートを有効にする
   ...(process.env.NODE_ENV === 'production' && process.env.NEXT_EXPORT === 'true' ? {
@@ -17,27 +20,39 @@ const nextConfig: NextConfig = {
         // 開発環境でのバックエンドAPIプロキシ（localhost FastAPIへ）
         {
           source: '/invoke',
-          destination: 'http://localhost:8000/invoke',
+          destination: `${BACKEND_URL}/invoke`,
         },
         {
           source: '/join_room',
-          destination: 'http://localhost:8000/join_room',
+          destination: `${BACKEND_URL}/join_room`,
         },
         {
           source: '/approve_join_request',
-          destination: 'http://localhost:8000/approve_join_request',
+          destination: `${BACKEND_URL}/approve_join_request`,
         },
         {
           source: '/create_room',
-          destination: 'http://localhost:8000/create_room',
+          destination: `${BACKEND_URL}/create_room`,
         },
         {
           source: '/stt',
-          destination: 'http://localhost:8000/stt',
+          destination: `${BACKEND_URL}/stt`,
         },
         {
           source: '/tts',
-          destination: 'http://localhost:8000/tts',
+          destination: `${BACKEND_URL}/tts`,
+        },
+        {
+          source: '/api/config',
+          destination: `${BACKEND_URL}/api/config`,
+        },
+        {
+          source: '/api/deep-analysis',
+          destination: `${BACKEND_URL}/api/deep-analysis`,
+        },
+        {
+          source: '/api/brain',
+          destination: `${BACKEND_URL}/api/brain`,
         },
       ];
     },

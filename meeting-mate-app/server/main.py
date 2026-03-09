@@ -5,9 +5,11 @@ from __future__ import annotations
 from config import (
     DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT,
     AGENT_CONFIG_DIR, MAX_ITERATIONS, MAX_RETRY_ATTEMPTS,
-    get_default_api_key, logger as config_logger
+    DEFAULT_GEMINI_API_KEY, get_default_api_key, logger as config_logger
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
+from deep_analysis import route_and_analyze
+from brain import process_brain_request
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
@@ -18,7 +20,7 @@ from firebase_admin import credentials, auth as firebase_auth, db
 import firebase_admin
 import os
 import json
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, validator
@@ -34,6 +36,22 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# --- クレデンシャルパス解決ヘルパー ---
+# .env の GOOGLE_APPLICATION_CREDENTIALS はプロジェクトルート基準 (./server/xxx.json)
+# uvicorn を server/ から起動すると壊れるため、実ファイルの存在を確認して修正する
+def _resolve_credentials_path() -> str:
+    """GCP クレデンシャルファイルのパスを解決する"""
+    env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    # server/ ディレクトリ (= このスクリプトと同階層) 内を探す
+    server_dir = os.path.dirname(os.path.abspath(__file__))
+    fallback = os.path.join(server_dir, "aimeebo-firebase-adminsdk-fbsvc-66b668e015.json")
+    if os.path.isfile(fallback):
+        return fallback
+    # env_path がある場合はそのまま返す (エラーメッセージで原因がわかるように)
+    return env_path or fallback
+
 try:
     database_url = os.getenv('FIREBASE_DATABASE_URL')
     if not database_url:
@@ -45,7 +63,12 @@ try:
             raise ValueError(
                 "FIREBASE_DATABASE_URL and GCP_PROJECT_ID not set.")
     if not firebase_admin._apps:
-        firebase_admin.initialize_app(options={'databaseURL': database_url})
+        cred_path = _resolve_credentials_path()
+        if cred_path and os.path.isfile(cred_path):
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred, options={'databaseURL': database_url})
+        else:
+            firebase_admin.initialize_app(options={'databaseURL': database_url})
     logger.info("Firebase Admin SDK initialized.")
 except Exception as e:
     logger.error(f"Error initializing Firebase Admin SDK: {e}")
@@ -69,6 +92,16 @@ task_agent = TaskManagementAgent(config_path=os.path.join(
 api_key_manager = FirebaseAPIKeyManager()
 
 ALLOWED_DEMO_ROOM = "demo_zenn"
+
+
+def get_session_data_path(room_id: str, session_id: str | None) -> str:
+    """セッションスコープのデータパスを返す。
+    sessionId がある場合: rooms/{roomId}/sessions/{sessionId}
+    sessionId がない場合: rooms/{roomId} (後方互換)
+    """
+    if session_id:
+        return f"rooms/{room_id}/sessions/{session_id}"
+    return f"rooms/{room_id}"
 
 
 def verify_demo_room_access(room_id: str):
@@ -118,6 +151,7 @@ class TaskPayload(BaseModel):
     taskId: str
     messages: List[LLMMessage]
     roomId: Optional[str] = "default_room"
+    sessionId: Optional[str] = None
     speakerId: str
     speakerName: Optional[str] = "Unknown Speaker"
     llmApiKey: Optional[str] = None
@@ -163,6 +197,63 @@ class AddMessageRequest(BaseModel):
     roomId: str
     message: str
     speakerName: Optional[str] = "Unknown User"
+
+
+# ================================================================
+# Endpoints: config (API key provider)
+# ================================================================
+
+@app.get("/api/config", summary="Get client configuration (API keys)")
+async def get_client_config():
+    """フロントエンドに Gemini API キーを提供する。
+    NOTE: 本番環境では認証を追加すること。"""
+    return {"geminiApiKey": DEFAULT_GEMINI_API_KEY}
+
+
+# ================================================================
+# Deep Analysis (Supervisor パターン)
+# ================================================================
+
+class DeepAnalysisRequest(BaseModel):
+    question: str
+    meeting_context: Optional[str] = ""
+    transcript_snippet: Optional[str] = ""
+
+@app.post("/api/deep-analysis", summary="Route and analyze complex questions")
+async def deep_analysis_endpoint(request: DeepAnalysisRequest):
+    """Router LLM で判定し、必要なら Deep Analysis LLM で分析を実行する"""
+    try:
+        result = await route_and_analyze(
+            question=request.question,
+            meeting_context=request.meeting_context or "",
+            transcript_snippet=request.transcript_snippet or "",
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Deep analysis failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
+# Endpoints: Brain (delegate_to_brain meta-tool)
+# ================================================================
+
+class BrainRequest(BaseModel):
+    request: str
+    meeting_context: Optional[Dict[str, Any]] = {}
+
+@app.post("/api/brain", summary="Process delegate_to_brain requests via Smart LLM")
+async def brain_endpoint(req: BrainRequest):
+    """Brain LLM でツール選択・実行・応答生成を行う"""
+    try:
+        result = await process_brain_request(
+            request=req.request,
+            meeting_context=req.meeting_context or {},
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Brain processing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ================================================================
@@ -282,14 +373,16 @@ async def process_single_agent(
     try:
         if hasattr(agent, 'execute'):
             room_ref_path = f"rooms/{task_payload.roomId}"
+            session_data_path = get_session_data_path(task_payload.roomId, task_payload.sessionId)
             room_data_snapshot = db.reference(room_ref_path).get() or {}
+            session_data_snapshot = db.reference(session_data_path).get() or {} if task_payload.sessionId else room_data_snapshot
             current_data_for_agent = {
                 "participants": room_data_snapshot.get("participants"),
-                "tasks": room_data_snapshot.get("tasks"),
-                "notes": room_data_snapshot.get("notes"),
-                "agenda": room_data_snapshot.get("currentAgenda"),
-                "overviewDiagram": room_data_snapshot.get("overviewDiagram"),
-                "suggestedNextTopics": room_data_snapshot.get("suggestedNextTopics"),
+                "tasks": session_data_snapshot.get("tasks"),
+                "notes": session_data_snapshot.get("notes"),
+                "agenda": session_data_snapshot.get("currentAgenda"),
+                "overviewDiagram": session_data_snapshot.get("overviewDiagram"),
+                "suggestedNextTopics": session_data_snapshot.get("suggestedNextTopics"),
                 "full_room_data": room_data_snapshot
             }
             task_payload.currentParticipants = current_data_for_agent["participants"]
@@ -319,7 +412,7 @@ async def process_single_agent(
                             db_key = "currentAgenda"
                         elif key == "overview_diagram":
                             db_key = "overviewDiagram"
-                        db.reference(f"{room_ref_path}/{db_key}").set(value)
+                        db.reference(f"{session_data_path}/{db_key}").set(value)
 
             results_dict[agent_name] = {
                 "data": updated_data_from_agent, "message": user_message_text}
@@ -525,7 +618,8 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         await asyncio.gather(*agent_tasks)
 
     # エージェントへの指示をトランスクリプトに追記
-    transcript_ref = db.reference(f"{room_ref_path}/transcript")
+    session_data_path = get_session_data_path(task_payload.roomId, task_payload.sessionId)
+    transcript_ref = db.reference(f"{session_data_path}/transcript")
 
     agent_display_config = {
         "TaskManagementAgent": {"icon": "🗂️", "short_name": "Task"},
@@ -562,18 +656,20 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         except Exception as e:
             logger.error(f"Error updating transcript: {e}", exc_info=True)
 
+    # セッションデータとルームデータの最新を取得
+    session_data_after = db.reference(session_data_path).get() or {}
     room_data_after_scheduling = db.reference(room_ref_path).get() or {}
 
     final_result = AgentResult(
         invokedAgents=active_agent_names,
         updatedParticipants=list(room_data_after_scheduling.get("participants", {}).values(
         )) if room_data_after_scheduling.get("participants") else None,
-        updatedTasks=list(room_data_after_scheduling.get(
-            "tasks", {}).values()) if room_data_after_scheduling.get("tasks") else None,
-        updatedNotes=list(room_data_after_scheduling.get(
-            "notes", {}).values()) if room_data_after_scheduling.get("notes") else None,
-        updatedAgenda=room_data_after_scheduling.get("currentAgenda"),
-        updatedOverviewDiagram=room_data_after_scheduling.get("overviewDiagram")
+        updatedTasks=list(session_data_after.get(
+            "tasks", {}).values()) if session_data_after.get("tasks") else None,
+        updatedNotes=list(session_data_after.get(
+            "notes", {}).values()) if session_data_after.get("notes") else None,
+        updatedAgenda=session_data_after.get("currentAgenda"),
+        updatedOverviewDiagram=session_data_after.get("overviewDiagram")
     )
     return final_result
 
@@ -599,7 +695,10 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
 
     try:
         room_ref = db.reference(f"rooms/{room_id}")
-        transcript_ref = room_ref.child("transcript")
+        session_id = task_payload.sessionId
+        session_data_path = get_session_data_path(room_id, session_id)
+        session_ref = db.reference(session_data_path)
+        transcript_ref = db.reference(f"{session_data_path}/transcript")
 
         if task_payload.messages and len(task_payload.messages) >= 1:
             latest_llm_message = task_payload.messages[0]
@@ -633,25 +732,25 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
             logger.info(f"[{room_id}] Demo room message. Skipping AI processing.")
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
 
-        room_data = room_ref.get()
-        if room_data is None:
-            return JsonRpcResponse(error={"code": -32000, "message": f"Server error: Room {room_id} disappeared"}, id=request.id)
+        session_data = session_ref.get()
+        if session_data is None:
+            session_data = {}
 
-        db_transcript_entries = room_data.get("transcript", [])
+        db_transcript_entries = session_data.get("transcript", [])
 
         user_messages = [entry for entry in db_transcript_entries if entry.get("role") != "ai"]
         current_user_message_count = len(user_messages)
 
-        last_processed_count = room_data.get("last_llm_processed_message_count", 0)
+        last_processed_count = session_data.get("last_llm_processed_message_count", 0)
         if last_processed_count > current_user_message_count:
             last_processed_count = 0
-            room_ref.child("last_llm_processed_message_count").set(0)
+            session_ref.child("last_llm_processed_message_count").set(0)
             logger.warning(f"[{room_id}] Reset last_llm_processed_message_count to 0.")
 
         logger.info(
             f"[{room_id}] Current user messages: {current_user_message_count}, Last processed: {last_processed_count}, Trigger: {LLM_TRIGGER_MESSAGE_COUNT}")
 
-        is_processing = room_data.get("is_llm_processing", False)
+        is_processing = session_data.get("is_llm_processing", False)
         if is_processing:
             logger.info(f"[{room_id}] LLM processing already in progress. Skipping.")
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
@@ -659,19 +758,19 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
         if (current_user_message_count - last_processed_count) >= LLM_TRIGGER_MESSAGE_COUNT:
             logger.info(f"[{room_id}] Triggering LLM processing.")
 
-            room_ref.child("is_llm_processing").set(True)
+            session_ref.child("is_llm_processing").set(True)
 
             try:
                 agent_processing_result = await orchestrate_agents(
                     task_payload, background_tasks, db_transcript_entries, task_payload.llmApiKey)
 
-                room_ref.child("last_llm_processed_message_count").set(current_user_message_count)
-                room_ref.child("is_llm_processing").set(False)
+                session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
+                session_ref.child("is_llm_processing").set(False)
 
                 return JsonRpcResponse(result=agent_processing_result, id=request.id)
             except Exception as e:
                 logger.error(f"[{room_id}] Error in orchestrate_agents: {e}", exc_info=True)
-                room_ref.child("is_llm_processing").set(False)
+                session_ref.child("is_llm_processing").set(False)
                 return JsonRpcResponse(error={"code": -32000, "message": f"LLM processing error: {str(e)}"}, id=request.id)
         else:
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
@@ -851,12 +950,35 @@ async def stt_endpoint(
     audio: UploadFile = File(...),
     room_id: str = Form(...),
     language: str = Form("ja"),
+    enable_diarization: bool = Form(False),
+    min_speakers: int = Form(2),
+    max_speakers: int = Form(6),
 ):
-    """音声ファイルを受信し、設定されたSTTプロバイダーでテキストに変換"""
+    """音声ファイルを受信し、設定されたSTTプロバイダーでテキストに変換。
+    enable_diarization=true の場合、Google Cloud STT v2 で話者分離を行う。"""
     from stt_provider import STTProvider
 
     audio_data = await audio.read()
 
+    # 話者分離モード: Google Cloud STT v2 + Service Account
+    if enable_diarization:
+        credentials_path = _resolve_credentials_path()
+        try:
+            result = await STTProvider.transcribe_with_diarization(
+                audio_data=audio_data,
+                credentials_path=credentials_path,
+                language=language,
+                mime_type=audio.content_type or "audio/webm",
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Diarized STT error: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"Diarized STT failed: {str(e)}")
+
+    # 通常モード（既存ロジック）
     room_config = api_key_manager.get_room_config(room_id)
     stt_provider_name = room_config.get("stt_provider", "") or os.environ.get("DEFAULT_STT_PROVIDER", "openai")
 
@@ -969,6 +1091,148 @@ async def approve_join_request_endpoint(request_data: ApproveJoinRequest):
     except Exception as e:
         logger.error(f"Error in /approve_join_request: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+
+# ================================================================
+# WebSocket Streaming STT (Phase 1: 話者分離リアルタイム)
+# ================================================================
+
+@app.websocket("/ws/stt/{room_id}")
+async def websocket_stt(websocket: WebSocket, room_id: str):
+    """
+    WebSocket Streaming STT エンドポイント。
+
+    プロトコル:
+      Client → Server:
+        { type: "config", language: "ja", minSpeakers: 2, maxSpeakers: 6 }
+        { type: "audio", data: "<base64 PCM16>", sampleRate: 16000 }
+        { type: "stop" }
+
+      Server → Client:
+        { type: "interim", speakerTag: 1, text: "...", startTime: 12.5 }
+        { type: "final", speakerTag: 2, text: "...", ... }
+        { type: "error", message: "..." }
+        { type: "status", connected: true }
+    """
+    from streaming_stt import StreamingSTTSession
+    import base64
+
+    await websocket.accept()
+    session: StreamingSTTSession | None = None
+
+    async def send_results():
+        """gRPC から結果を受信して WebSocket に転送するタスク"""
+        try:
+            while True:
+                result = await session.get_result()
+                if result is None:
+                    break
+                await websocket.send_json(result)
+        except Exception as e:
+            logger.error(f"[ws/stt/{room_id}] Result sender error: {e}")
+
+    result_task: asyncio.Task | None = None
+
+    try:
+        # config メッセージを待つ
+        config_msg = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+
+        if config_msg.get("type") != "config":
+            await websocket.send_json({
+                "type": "error",
+                "message": "First message must be type 'config'"
+            })
+            await websocket.close()
+            return
+
+        language = config_msg.get("language", "ja")
+        min_speakers = config_msg.get("minSpeakers", 2)
+        max_speakers = config_msg.get("maxSpeakers", 6)
+        sample_rate = config_msg.get("sampleRate", 16000)
+
+        credentials_path = _resolve_credentials_path()
+
+        logger.info(
+            f"[ws/stt/{room_id}] Starting streaming STT: "
+            f"lang={language}, speakers={min_speakers}-{max_speakers}"
+        )
+
+        session = StreamingSTTSession(
+            credentials_path=credentials_path,
+            language=language,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            sample_rate=sample_rate,
+        )
+        await session.start()
+
+        # 結果転送タスクを起動
+        result_task = asyncio.create_task(send_results())
+
+        # 音声データを受信し続ける
+        while True:
+            msg = await websocket.receive_json()
+            msg_type = msg.get("type")
+
+            if msg_type == "audio":
+                audio_b64 = msg.get("data", "")
+                if audio_b64:
+                    audio_bytes = base64.b64decode(audio_b64)
+                    session.send_audio(audio_bytes)
+
+            elif msg_type == "stop":
+                logger.info(f"[ws/stt/{room_id}] Client sent stop")
+                break
+
+            elif msg_type == "config":
+                # 再設定（セッション再起動）
+                logger.info(f"[ws/stt/{room_id}] Reconfiguring session")
+                await session.stop()
+                if result_task:
+                    result_task.cancel()
+
+                language = msg.get("language", language)
+                min_speakers = msg.get("minSpeakers", min_speakers)
+                max_speakers = msg.get("maxSpeakers", max_speakers)
+                sample_rate = msg.get("sampleRate", sample_rate)
+
+                session = StreamingSTTSession(
+                    credentials_path=credentials_path,
+                    language=language,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    sample_rate=sample_rate,
+                )
+                await session.start()
+                result_task = asyncio.create_task(send_results())
+
+    except WebSocketDisconnect:
+        logger.info(f"[ws/stt/{room_id}] Client disconnected")
+    except asyncio.TimeoutError:
+        logger.warning(f"[ws/stt/{room_id}] Config timeout, closing")
+        await websocket.send_json({
+            "type": "error",
+            "message": "Config message timeout"
+        })
+    except Exception as e:
+        logger.error(f"[ws/stt/{room_id}] Error: {e}", exc_info=True)
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e)
+            })
+        except Exception:
+            pass
+    finally:
+        if session:
+            await session.stop()
+        if result_task and not result_task.done():
+            result_task.cancel()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        logger.info(f"[ws/stt/{room_id}] WebSocket closed")
 
 
 if __name__ == "__main__":

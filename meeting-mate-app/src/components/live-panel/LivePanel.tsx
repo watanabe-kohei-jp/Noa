@@ -1,43 +1,90 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
-  ChevronRight,
-  ChevronLeft,
+  Phone,
+  PhoneOff,
+  MonitorUp,
+  MonitorOff,
   ToggleLeft,
   ToggleRight,
   Sparkles,
+  Loader2,
 } from "lucide-react";
 import { LiveAPIProvider, useLiveAPIContext } from "../../contexts/LiveAPIContext";
-import LiveChatDisplay, { LiveChatMessage } from "./LiveChatDisplay";
-import LiveControlTray from "./LiveControlTray";
+import { AudioRecorder } from "../../lib/audio-recorder";
 import { LiveToolHandler, MeetingContextProvider } from "../../lib/live-tools/tool-handler";
 import { liveToolDeclarations } from "../../lib/live-tools/tool-declarations";
-import { getSystemPrompt, getModeLabel } from "../../lib/live-tools/system-prompts";
+import { getSystemPrompt } from "../../lib/live-tools/system-prompts";
 import type { LiveMode } from "../../types/live-api";
 import type { SessionData } from "../../types/data";
+import { useBrain } from "../../hooks/useBrain";
+import { filterThinkingText } from "../../lib/transcript-filter";
 import { Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveConnectConfig } from "@google/genai";
 
-// Firebase 書き込み用（トランスクリプト同期）
-import { ref, push } from "firebase/database";
+// Firebase
+import { ref, push, set } from "firebase/database";
 import { database as getDatabase } from "../../firebase";
+
+/* ------------------------------------------------------------------ */
+/*  LivePanelInner - headless event handler + inline controls          */
+/* ------------------------------------------------------------------ */
 
 interface LivePanelInnerProps {
   roomId: string | null;
   roomData: SessionData | null;
-  onDiagramGenerated?: (mermaidCode: string) => void;
+  sharedStream?: MediaStream | null;
+  currentSessionId?: string | null;
 }
 
 function LivePanelInner({
   roomId,
   roomData,
-  onDiagramGenerated,
+  sharedStream,
+  currentSessionId,
 }: LivePanelInnerProps) {
-  const { client, setConfig, connected } = useLiveAPIContext();
-  const [messages, setMessages] = useState<LiveChatMessage[]>([]);
+  const { client, setConfig, connected, connect, disconnect, volume } =
+    useLiveAPIContext();
+
   const [mode, setMode] = useState<LiveMode>("passive");
   const toolHandlerRef = useRef<LiveToolHandler>(new LiveToolHandler());
+
+  // Audio recording (merged from LiveControlTray)
+  const [inVolume, setInVolume] = useState(0);
+  const [tabAudioActive, setTabAudioActive] = useState(false);
+  const [audioRecorder] = useState(() => new AudioRecorder());
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const tabStreamRef = useRef<MediaStream | null>(null);
+
+  // Brain hook (delegate_to_brain meta-tool)
+  const brainCallbacks = useMemo(() => ({
+    onTaskCreated: (task: { title: string; assignee?: string; dueDate?: string; priority?: string }) => {
+      if (!roomId) return;
+      const db = getDatabase();
+      if (!db) return;
+      const taskId =
+        Date.now().toString() + Math.random().toString(36).substring(2, 8);
+      const path = currentSessionId
+        ? `rooms/${roomId}/sessions/${currentSessionId}/tasks/${taskId}`
+        : `rooms/${roomId}/tasks/${taskId}`;
+      const taskRef = ref(db, path);
+      set(taskRef, {
+        id: taskId,
+        title: task.title,
+        assignee: task.assignee || "",
+        dueDate: task.dueDate || "",
+        priority: task.priority || "medium",
+        status: "todo",
+      });
+    },
+    onDiagram: () => {},
+  }), [roomId, currentSessionId]);
+  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks);
+
+  // Accumulate current model turn text (no UI state needed)
+  const currentModelTextRef = useRef<string>("");
 
   // Configure tool handler with room context
   useEffect(() => {
@@ -46,37 +93,34 @@ function LivePanelInner({
     };
     toolHandlerRef.current.setContextProvider(contextProvider);
     toolHandlerRef.current.setCallbacks({
-      onDiagram: (mermaidCode, title) => {
-        onDiagramGenerated?.(mermaidCode);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "model",
-            text: `[図を生成しました: ${title}]`,
-            timestamp: new Date(),
-          },
-        ]);
-      },
+      onBrainRequested: requestBrain,
     });
-  }, [roomData, onDiagramGenerated]);
+  }, [roomData, requestBrain]);
 
   // Sync transcript to Firebase
   const syncTranscriptToFirebase = useCallback(
     (text: string, role: "user" | "ai") => {
-      if (!roomId || !text.trim()) return;
+      // AI発話の場合、内部思考テキスト (markdown) をフィルタ
+      const cleanText = role === "ai" ? filterThinkingText(text) : text;
+      if (!roomId || !cleanText.trim()) return;
       const db = getDatabase();
       if (!db) return;
 
-      const transcriptRef = ref(db, `sessions/${roomId}/transcript`);
+      const path = currentSessionId
+        ? `rooms/${roomId}/sessions/${currentSessionId}/transcript`
+        : `rooms/${roomId}/transcript`;
+      const transcriptRef = ref(db, path);
       push(transcriptRef, {
-        userId: role === "ai" ? "noa-live" : "live-user",
-        userName: role === "ai" ? "Noa (Live)" : "Live User",
-        text: text.trim(),
+        userId: role === "ai" ? "noa" : "live-user",
+        userName: role === "ai" ? "Noa" : "Live User",
+        text: cleanText.trim(),
         timestamp: new Date().toISOString(),
         role,
+        speakerId: role === "ai" ? "noa" : "live-user",
+        source: "live-api",
       });
     },
-    [roomId]
+    [roomId, currentSessionId]
   );
 
   // Update config when mode changes
@@ -85,59 +129,38 @@ function LivePanelInner({
       systemInstruction: {
         parts: [{ text: getSystemPrompt(mode) }],
       },
-      tools: [{ functionDeclarations: liveToolDeclarations }],
+      tools: [
+        { functionDeclarations: liveToolDeclarations },
+        { googleSearch: {} },
+      ],
       responseModalities: [Modality.AUDIO],
       speechConfig: {
         voiceConfig: {
           prebuiltVoiceConfig: { voiceName: "Kore" },
         },
       },
+      outputAudioTranscription: {},
     };
     setConfig(config);
   }, [mode, setConfig]);
 
-  // Listen for content events (transcripts)
+  // Listen for content events (headless - no UI messages state)
   useEffect(() => {
     const onContent = (data: { modelTurn?: { parts?: { text?: string }[] } }) => {
       if (data.modelTurn?.parts) {
         for (const part of data.modelTurn.parts) {
           if (part.text) {
-            setMessages((prev) => {
-              // Merge with last model message if it exists and is the latest
-              const lastMsg = prev[prev.length - 1];
-              if (lastMsg && lastMsg.role === "model") {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
-                  ...lastMsg,
-                  text: lastMsg.text + part.text,
-                };
-                return updated;
-              }
-              return [
-                ...prev,
-                { role: "model", text: part.text!, timestamp: new Date() },
-              ];
-            });
+            currentModelTextRef.current += part.text;
           }
         }
       }
     };
 
     const onTurnComplete = () => {
-      // Force next model message to be a new entry
-      setMessages((prev) => {
-        if (prev.length === 0) return prev;
-        const last = prev[prev.length - 1];
-        if (last.role === "model") {
-          // Sync completed transcript to Firebase
-          syncTranscriptToFirebase(last.text, "ai");
-        }
-        return [...prev, { role: "model" as const, text: "", timestamp: new Date() }];
-      });
-      // Remove empty trailing message
-      setMessages((prev) =>
-        prev.filter((m, i) => i < prev.length - 1 || m.text.trim() !== "")
-      );
+      if (currentModelTextRef.current.trim()) {
+        syncTranscriptToFirebase(currentModelTextRef.current, "ai");
+      }
+      currentModelTextRef.current = "";
     };
 
     const onToolCall = (toolCall: LiveServerToolCall) => {
@@ -155,117 +178,276 @@ function LivePanelInner({
     };
   }, [client, syncTranscriptToFirebase]);
 
-  const handleSendText = (text: string) => {
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", text, timestamp: new Date() },
-    ]);
-    syncTranscriptToFirebase(text, "user");
-  };
+  // Microphone audio -> Gemini (shared stream)
+  useEffect(() => {
+    const onData = (base64: string) => {
+      client.sendRealtimeInput([
+        { mimeType: "audio/pcm;rate=16000", data: base64 },
+      ]);
+    };
+
+    console.log("[LivePanel] Audio effect:", { connected, hasStream: !!sharedStream });
+    if (connected && sharedStream) {
+      console.log("[LivePanel] Starting audioRecorder with sharedStream");
+      audioRecorder
+        .on("data", onData)
+        .on("volume", setInVolume)
+        .start(sharedStream)
+        .then(() => console.log("[LivePanel] audioRecorder started OK"))
+        .catch((err: unknown) =>
+          console.warn("[LivePanel] audioRecorder start failed:", err)
+        );
+    } else {
+      audioRecorder.stop();
+    }
+
+    return () => {
+      audioRecorder.off("data", onData).off("volume", setInVolume);
+    };
+  }, [connected, client, sharedStream, audioRecorder]);
+
+  // Tab audio capture
+  const stopTabAudio = useCallback(() => {
+    tabStreamRef.current?.getTracks().forEach((t) => t.stop());
+    tabStreamRef.current = null;
+    setTabAudioActive(false);
+  }, []);
+
+  const startTabAudio = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+
+      tabStreamRef.current = stream;
+      setTabAudioActive(true);
+
+      // Tab audio -> PCM16 -> Gemini
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        const audioCtx = new AudioContext({ sampleRate: 16000 });
+        const source = audioCtx.createMediaStreamSource(
+          new MediaStream(audioTracks)
+        );
+        const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          if (!connected) return;
+          const float32 = e.inputBuffer.getChannelData(0);
+          const int16 = new Int16Array(float32.length);
+          for (let i = 0; i < float32.length; i++) {
+            int16[i] = float32[i] * 32768;
+          }
+          const bytes = new Uint8Array(int16.buffer);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const base64 = btoa(binary);
+          client.sendRealtimeInput([
+            { mimeType: "audio/pcm;rate=16000", data: base64 },
+          ]);
+        };
+
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
+      }
+
+      // Video frames from tab -> Gemini (low fps)
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length > 0 && videoRef.current && canvasRef.current) {
+        const video = videoRef.current;
+        video.srcObject = new MediaStream(videoTracks);
+        await video.play();
+
+        const sendFrame = () => {
+          if (!connected || !tabStreamRef.current) return;
+          const canvas = canvasRef.current;
+          if (!canvas || !video) return;
+
+          canvas.width = video.videoWidth * 0.25;
+          canvas.height = video.videoHeight * 0.25;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const base64 = canvas.toDataURL("image/jpeg", 0.5);
+          const data = base64.slice(base64.indexOf(",") + 1);
+          client.sendRealtimeInput([{ mimeType: "image/jpeg", data }]);
+
+          setTimeout(sendFrame, 2000); // 0.5 FPS
+        };
+        sendFrame();
+      }
+
+      // Handle stream end
+      stream.getTracks().forEach((track) => {
+        track.onended = () => stopTabAudio();
+      });
+    } catch (err) {
+      console.error("Tab audio capture failed:", err);
+    }
+  }, [connected, client, stopTabAudio]);
 
   const toggleMode = () => {
     setMode((prev) => (prev === "passive" ? "active" : "passive"));
   };
 
+  const volumeWidth = (vol: number) =>
+    `${Math.min(vol * 300, 100)}%`;
+
   return (
-    <div className="flex flex-col h-full">
-      {/* Header with mode toggle */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
-        <div className="flex items-center gap-2">
-          <Sparkles size={16} className="text-yellow-500" />
-          <span className="font-medium text-sm text-gray-900 dark:text-gray-100">
-            Live AI
-          </span>
-          {connected && (
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          )}
-        </div>
+    <div className="flex items-center gap-2">
+      {/* Hidden elements for tab capture */}
+      <video ref={videoRef} className="hidden" playsInline />
+      <canvas ref={canvasRef} className="hidden" />
 
+      {/* Live AI indicator */}
+      <Sparkles size={14} className="text-yellow-500 flex-shrink-0" />
+      {connected && (
+        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse flex-shrink-0" />
+      )}
+
+      {/* Connect / Disconnect */}
+      <button
+        onClick={connected ? disconnect : connect}
+        className={`p-2 rounded-xl transition-all ${
+          connected
+            ? "bg-red-500 hover:bg-red-600 text-white"
+            : "bg-green-500 hover:bg-green-600 text-white"
+        }`}
+        title={connected ? "Live AI 切断" : "Live AI 接続"}
+      >
+        {connected ? <PhoneOff size={16} /> : <Phone size={16} />}
+      </button>
+
+      {/* Mode toggle */}
+      <button
+        onClick={toggleMode}
+        disabled={connected}
+        className={`p-2 rounded-xl transition-all ${
+          connected
+            ? "opacity-50 cursor-not-allowed"
+            : "hover:bg-gray-200 dark:hover:bg-gray-600"
+        } ${
+          mode === "active"
+            ? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+            : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+        }`}
+        title={`モード: ${mode === "active" ? "Active" : "Passive"}`}
+      >
+        {mode === "active" ? (
+          <ToggleRight size={16} />
+        ) : (
+          <ToggleLeft size={16} />
+        )}
+      </button>
+
+      {/* Tab audio capture */}
+      {connected && (
         <button
-          onClick={toggleMode}
-          className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-          title={`モード切替: ${getModeLabel(mode)}`}
-          disabled={connected}
+          onClick={tabAudioActive ? stopTabAudio : startTabAudio}
+          className={`p-2 rounded-xl transition ${
+            tabAudioActive
+              ? "bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400"
+              : "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300"
+          }`}
+          title={tabAudioActive ? "タブ音声停止" : "タブ音声キャプチャ"}
         >
-          {mode === "active" ? (
-            <ToggleRight size={16} className="text-orange-500" />
-          ) : (
-            <ToggleLeft size={16} className="text-blue-500" />
-          )}
-          <span className="text-gray-600 dark:text-gray-400">
-            {mode === "active" ? "Active" : "Passive"}
-          </span>
+          {tabAudioActive ? <MonitorOff size={16} /> : <MonitorUp size={16} />}
         </button>
-      </div>
+      )}
 
-      {/* Chat display */}
-      <div className="flex-1 overflow-hidden">
-        <LiveChatDisplay messages={messages} />
-      </div>
+      {/* Brain processing indicator */}
+      {isProcessing && (
+        <span className="flex items-center gap-1 text-xs text-amber-500 animate-pulse flex-shrink-0">
+          <Loader2 size={12} className="animate-spin" />
+          処理中...
+        </span>
+      )}
 
-      {/* Controls */}
-      <LiveControlTray
-        mode={mode}
-        onSendText={handleSendText}
-      />
+      {/* Volume indicators (compact) */}
+      {connected && (
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="w-8 h-1.5 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
+            <div
+              className="h-full bg-green-500 transition-all duration-75"
+              style={{ width: volumeWidth(inVolume) }}
+            />
+          </div>
+          <div className="w-8 h-1.5 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all duration-75"
+              style={{ width: volumeWidth(volume) }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// Wrapper with LiveAPIProvider
+/* ------------------------------------------------------------------ */
+/*  LivePanel - API key fetch + provider wrapper (inline, no sidebar)  */
+/* ------------------------------------------------------------------ */
+
 interface LivePanelProps {
   roomId: string | null;
   roomData: SessionData | null;
-  onDiagramGenerated?: (mermaidCode: string) => void;
+  sharedStream?: MediaStream | null;
+  currentSessionId?: string | null;
 }
 
 export default function LivePanel({
   roomId,
   roomData,
-  onDiagramGenerated,
+  sharedStream,
+  currentSessionId,
 }: LivePanelProps) {
-  const [collapsed, setCollapsed] = useState(false);
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
 
-  if (!apiKey) {
+  useEffect(() => {
+    fetch("/api/config")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.geminiApiKey) {
+          setApiKey(data.geminiApiKey);
+        } else {
+          setKeyError("Gemini APIキー未設定");
+        }
+      })
+      .catch(() => {
+        setKeyError("バックエンド接続エラー");
+      });
+  }, []);
+
+  const liveOptions = useMemo(() => (apiKey ? { apiKey } : null), [apiKey]);
+
+  if (keyError) {
     return (
-      <div className="flex items-center justify-center h-full p-4 text-sm text-gray-500">
-        <p>
-          NEXT_PUBLIC_GEMINI_API_KEY が設定されていません。
-          <br />
-          .env.local に追加してください。
-        </p>
-      </div>
+      <span className="text-xs text-red-400" title={keyError}>
+        <Sparkles size={14} className="inline text-red-400" /> Live AI エラー
+      </span>
+    );
+  }
+
+  if (!liveOptions) {
+    return (
+      <span className="text-xs text-gray-400">
+        <Sparkles size={14} className="inline" /> 読込中...
+      </span>
     );
   }
 
   return (
-    <div
-      className={`fixed right-0 top-0 h-full bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 shadow-lg transition-all duration-300 z-40 flex ${
-        collapsed ? "w-10" : "w-80"
-      }`}
-    >
-      {/* Collapse toggle */}
-      <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="absolute -left-3 top-1/2 -translate-y-1/2 w-6 h-12 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-l-lg flex items-center justify-center shadow-sm hover:bg-gray-50 dark:hover:bg-gray-700 z-50"
-      >
-        {collapsed ? (
-          <ChevronLeft size={14} />
-        ) : (
-          <ChevronRight size={14} />
-        )}
-      </button>
-
-      {!collapsed && (
-        <LiveAPIProvider options={{ apiKey }}>
-          <LivePanelInner
-            roomId={roomId}
-            roomData={roomData}
-            onDiagramGenerated={onDiagramGenerated}
-          />
-        </LiveAPIProvider>
-      )}
-    </div>
+    <LiveAPIProvider options={liveOptions}>
+      <LivePanelInner
+        roomId={roomId}
+        roomData={roomData}
+        sharedStream={sharedStream}
+        currentSessionId={currentSessionId}
+      />
+    </LiveAPIProvider>
   );
 }
