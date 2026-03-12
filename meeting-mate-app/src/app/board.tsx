@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { auth } from '../firebase';
 import { signInAnonymously } from 'firebase/auth';
+import { authFetch } from '../lib/api-client';
 import { Users, MessageSquare, FileText, Clock, CheckCircle, AlertTriangle, BarChart3, Calendar, TrendingUp, Mic, ListTodo, ChevronDown, ChevronUp } from 'lucide-react';
 import * as d3 from 'd3';
 
@@ -168,7 +169,7 @@ export default function MeetingMatePage() {
 
   const callBackendApi = useCallback(async (newestEntry: TranscriptEntry, currentTranscriptSnapshot: TranscriptEntry[]) => { 
     const requestBody = { jsonrpc: "2.0", method: "ExecuteTask", params: { task: { taskId: generateUniqueId(), messages: [...currentTranscriptSnapshot.map(e => ({ role: e.speaker === currentUser?.name ? "user" : "agent", parts: [{ text: e.text }] })), { role: "user", parts: [{ text: newestEntry.text }] }], roomId: currentRoomId, speakerName: currentUser?.name || "Unknown Speaker" } }, id: generateUniqueId() }; 
-    const response = await fetch("/invoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody) }); 
+    const response = await authFetch("/invoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody) });
     if (!response.ok) throw new Error(`APIエラー ${response.status}: ${await response.text()}`); 
     return response.json(); 
   }, [currentUser, currentRoomId]);

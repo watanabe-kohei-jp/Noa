@@ -10,6 +10,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { audioContext } from "@/lib/audio-utils";
 import AudioRecordingWorklet from "@/lib/worklets/audio-processing";
 import { createWorketFromSrc } from "@/lib/audioworklet-registry";
+import { getAuthToken } from "../lib/api-client";
 
 // --- Types ---
 
@@ -57,7 +58,7 @@ interface UseStreamingSTTOptions {
 
 interface UseStreamingSTTReturn {
   /** STT ストリーミングを開始 */
-  startSTT: () => void;
+  startSTT: () => void | Promise<void>;
   /** STT ストリーミングを停止 */
   stopSTT: () => void;
   /** 接続中かどうか */
@@ -227,7 +228,7 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
     audioCtxRef.current = null;
   }, []);
 
-  const startSTT = useCallback(() => {
+  const startSTT = useCallback(async () => {
     // streamRef から最新の stream を取得 (stale closure 対策)
     const currentStream = streamRef.current;
 
@@ -248,8 +249,9 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
     }
 
     pendingStartRef.current = false;
+    const token = await getAuthToken();
     const wsBase = options.wsUrl || getWsBaseUrl();
-    const url = `${wsBase}/ws/stt/${encodeURIComponent(roomId)}`;
+    const url = `${wsBase}/ws/stt/${encodeURIComponent(roomId)}?token=${encodeURIComponent(token || "")}`;
 
     console.log("[StreamingSTT] Connecting to", url);
     const ws = new WebSocket(url);

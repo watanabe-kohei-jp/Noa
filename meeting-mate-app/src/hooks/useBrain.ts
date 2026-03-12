@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import type { GenAILiveClient } from "../lib/genai-live-client";
 import type { SessionData, TranscriptEntry } from "../types/data";
+import { authFetch } from "../lib/api-client";
 
 interface BrainAction {
   action: string;
@@ -90,7 +91,7 @@ export function useBrain(
         const meetingContext = buildMeetingContext(roomData);
         console.log("[useBrain] calling /api/brain...");
 
-        const res = await fetch("/api/brain", {
+        const res = await authFetch("/api/brain", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -129,7 +130,7 @@ export function useBrain(
         // Deep Path: 詳細分析を非同期で並列実行
         if (data.deep_analysis_pending && data.deep_request) {
           console.log("[useBrain] Deep analysis pending → calling /api/deep-analysis in background");
-          fetch("/api/deep-analysis", {
+          authFetch("/api/deep-analysis", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(data.deep_request),
