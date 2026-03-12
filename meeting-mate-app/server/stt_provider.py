@@ -283,7 +283,6 @@ class STTProvider:
             for word_info in alt.words:
                 tag = word_info.speaker_tag
                 word_start = word_info.start_offset.total_seconds() if word_info.start_offset else 0.0
-                word_end = word_info.end_offset.total_seconds() if word_info.end_offset else 0.0
 
                 if tag != current_speaker:
                     # 話者が変わった → 前のセグメントを保存

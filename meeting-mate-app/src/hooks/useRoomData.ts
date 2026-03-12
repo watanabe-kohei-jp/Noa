@@ -367,7 +367,6 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     const firebaseDb = db();
     if (!firebaseDb) return;
 
-    const sessionRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}`);
     // status と endedAt を更新
     const statusRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/status`);
     const endedRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/endedAt`);
