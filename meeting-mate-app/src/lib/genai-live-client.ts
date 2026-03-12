@@ -144,7 +144,7 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
   }
 
   protected async onmessage(message: LiveServerMessage) {
-    const msgKeys = Object.keys(message).filter(k => (message as Record<string, unknown>)[k] != null);
+    const msgKeys = Object.keys(message).filter(k => (message as unknown as Record<string, unknown>)[k] != null);
     console.log("[GenAILive] onmessage:", msgKeys.join(", "));
     if (message.setupComplete) {
       console.log("[GenAILive] Setup complete!");

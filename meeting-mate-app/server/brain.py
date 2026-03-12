@@ -17,10 +17,12 @@ from config import BRAIN_LLM_MODEL, ROUTER_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAU
 from knowledge_base import MockKnowledgeBase
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
+from meeting_memory import MeetingMemory
 
 logger = logging.getLogger(__name__)
 
 kb = MockKnowledgeBase()
+meeting_memory = MeetingMemory()
 
 # ================================================================
 # Prompts
@@ -51,6 +53,10 @@ TOOL_SELECTION_PROMPT = """あなたは会議AIアシスタント「Noa」のブ
 
 - generate_diagram: Mermaid記法の図を生成
   args: {{ "description": "図の説明", "diagram_type": "flowchart|sequence|gantt|mindmap|pie" }}
+
+- search_past_meetings: 過去の会議セッションの内容を検索
+  「前回の会議で決まったことは？」「先週のプロジェクトXの議論は？」等
+  args: {{ "query": "検索クエリ（自然言語）" }}
 
 - deep_analysis: 以下のいずれかに該当する質問に使用:
   (1) 複雑な分析・比較・リスク評価・多角的な検討
@@ -197,6 +203,26 @@ async def execute_tool(tool_name: str, args: dict, meeting_context: dict) -> dic
             "description": description,
             "diagram_type": diagram_type,
             "message": f"{diagram_type}の図を生成してください。",
+        }
+
+    elif tool_name == "search_past_meetings":
+        query = args.get("query", "")
+        if not query:
+            return {"found": False, "message": "検索クエリが必要です。"}
+        results = await meeting_memory.search(query)
+        if not results:
+            return {"found": False, "message": "過去の会議データが見つかりませんでした。まだ終了した会議がないか、関連するデータがありません。"}
+        return {
+            "found": True,
+            "results": [
+                {
+                    "session_name": r.get("metadata", {}).get("session_name", "不明"),
+                    "date": r.get("metadata", {}).get("started_at", "不明"),
+                    "summary": r.get("summary", ""),
+                }
+                for r in results
+            ],
+            "query": query,
         }
 
     elif tool_name == "deep_analysis":
