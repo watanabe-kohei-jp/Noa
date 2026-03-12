@@ -11,7 +11,7 @@ from config import (
     ROUTER_LLM_MODEL, DEEP_ANALYSIS_MODEL,
     DEFAULT_GEMINI_API_KEY, get_default_api_key,
 )
-from llm_provider import llm_complete, detect_provider
+from llm_provider import llm_complete, llm_complete_with_tools, detect_provider
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ async def route_and_analyze(
 
     t_analysis_start = time.perf_counter()
     try:
-        analysis = await llm_complete(
+        analysis = await llm_complete_with_tools(
             model=DEEP_ANALYSIS_MODEL,
             prompt=ANALYSIS_PROMPT_TEMPLATE.format(
                 question=question,

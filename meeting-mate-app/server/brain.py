@@ -15,7 +15,7 @@ from datetime import datetime
 
 from config import BRAIN_LLM_MODEL, ROUTER_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAULT_GEMINI_API_KEY, get_default_api_key
 from knowledge_base import MockKnowledgeBase
-from llm_provider import llm_complete, strip_code_blocks, detect_provider
+from llm_provider import llm_complete, llm_complete_with_tools, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
 
 logger = logging.getLogger(__name__)
@@ -262,13 +262,13 @@ def _build_context_summary(meeting_context: dict) -> str:
     if transcript:
         recent = transcript[-5:]
         lines = [f"  {t.get('speaker', '?')}: {t.get('text', '')}" for t in recent]
-        parts.append(f"直近の発言:\n" + "\n".join(lines))
+        parts.append("直近の発言:\n" + "\n".join(lines))
 
     tasks = meeting_context.get("tasks", [])
     open_tasks = [t for t in tasks if t.get("status") != "done"]
     if open_tasks:
         task_lines = [f"  - {t['title']} ({t.get('assignee', '未割当')})" for t in open_tasks[:5]]
-        parts.append(f"未完了タスク:\n" + "\n".join(task_lines))
+        parts.append("未完了タスク:\n" + "\n".join(task_lines))
 
     return "\n".join(parts) if parts else "(会議コンテキストなし)"
 
@@ -358,10 +358,10 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
             }
 
         # Router が "none" 判定 or 分析失敗 → gemini-2.5-flash で直接回答
-        logger.info(f"[Brain] Deep analysis not routed or failed, falling back to direct response")
+        logger.info("[Brain] Deep analysis not routed or failed, falling back to direct response")
         t_fallback_start = time.perf_counter()
         try:
-            response_text = await llm_complete(
+            response_text = await llm_complete_with_tools(
                 model=BRAIN_LLM_MODEL,
                 prompt=f"""あなたは会議AIアシスタント「Noa」です。
 以下の質問に自然な日本語で回答してください。音声読み上げ用なので500文字以内。
@@ -406,7 +406,7 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
         if not response_text:
             # direct_response で response が空の場合、改めて生成
             try:
-                response_text = await llm_complete(
+                response_text = await llm_complete_with_tools(
                     model=BRAIN_LLM_MODEL,
                     prompt=f"""あなたは会議AIアシスタント「Noa」です。
 以下の質問に自然な日本語で回答してください。音声読み上げ用なので500文字以内。
@@ -443,7 +443,7 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
     # Pass 2: 応答テキスト生成
     t_resp_start = time.perf_counter()
     try:
-        response_text = await llm_complete(
+        response_text = await llm_complete_with_tools(
             model=BRAIN_LLM_MODEL,
             prompt=RESPONSE_GENERATION_PROMPT.format(
                 request=request,

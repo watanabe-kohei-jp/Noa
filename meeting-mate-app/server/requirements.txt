@@ -10,3 +10,4 @@ cryptography
 python-multipart
 aiohttp
 google-cloud-speech
+google-genai
