@@ -70,11 +70,11 @@ class AudioProcessingWorklet extends AudioWorkletProcessor {
           this.speechConfirmCount++;
           if (this.speechConfirmCount >= this.speechConfirmFrames) {
             // Transition: SILENCE → SPEAKING
+            // flushPreBuffer がトリガーフレーム含むリングバッファを全て processChunk に渡す
             this.flushPreBuffer();
             this.vadState = 1;
             this.holdCounter = 0;
             this.port.postMessage({ event: "vad", speaking: true });
-            this.processChunk(float32Array);
           }
         } else {
           this.speechConfirmCount = 0;
