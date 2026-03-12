@@ -1,9 +1,9 @@
-// Function Calling ハンドラー - delegate_to_brain メタツール用
-// Progressive FC: willContinue で即時 ack → Brain API 結果で最終 response
-// NOTE: sendClientContent (client.send) は native audio model の FC サイクルを壊すため使わない。
-import { LiveServerToolCall, FunctionResponseScheduling } from "@google/genai";
-import { GenAILiveClient } from "../genai-live-client";
+import {
+  FunctionResponseScheduling,
+  LiveServerToolCall,
+} from "@google/genai";
 import type { SessionData } from "../../types/data";
+import { GenAILiveClient } from "../genai-live-client";
 
 export interface BrainResult {
   response_text?: string;
@@ -38,9 +38,10 @@ export interface MeetingContextProvider {
 export class LiveToolHandler {
   private contextProvider: MeetingContextProvider | null = null;
   private callbacks: ToolResultCallbacks = {};
-  private lastBrainRequest: string = "";
-  private lastBrainTime: number = 0;
-  private cancelledIds: Set<string> = new Set();
+  private lastBrainRequest = "";
+  private lastBrainTime = 0;
+  private cancelledIds = new Set<string>();
+  private activeFunctionCallIds = new Set<string>();
 
   setContextProvider(provider: MeetingContextProvider) {
     this.contextProvider = provider;
@@ -50,16 +51,22 @@ export class LiveToolHandler {
     this.callbacks = callbacks;
   }
 
-  /** toolcallcancellation イベントで呼ばれる */
   markCancelled(id: string) {
+    if (!this.activeFunctionCallIds.has(id)) {
+      console.log("[ToolHandler] Ignoring stale cancellation:", id);
+      return;
+    }
+
     this.cancelledIds.add(id);
     console.log("[ToolHandler] FC cancelled:", id);
   }
 
-  async handleToolCall(
-    toolCall: LiveServerToolCall,
-    client: GenAILiveClient
-  ) {
+  private cleanupFunctionCall(id: string) {
+    this.activeFunctionCallIds.delete(id);
+    this.cancelledIds.delete(id);
+  }
+
+  async handleToolCall(toolCall: LiveServerToolCall, client: GenAILiveClient) {
     const functionCalls = toolCall.functionCalls || [];
     console.log("[ToolHandler] handleToolCall:", {
       count: functionCalls.length,
@@ -77,27 +84,23 @@ export class LiveToolHandler {
           args.request,
           client
         );
-      } else {
-        // Unknown tool — single response
-        client.sendToolResponse({
-          functionResponses: [
-            {
-              id: fc.id!,
-              name: fc.name!,
-              response: { error: `Unknown tool: ${fc.name}` },
-              scheduling: FunctionResponseScheduling.INTERRUPT,
-            },
-          ],
-        });
+        continue;
       }
+
+      client.sendToolResponse({
+        functionResponses: [
+          {
+            id: fc.id!,
+            name: fc.name!,
+            willContinue: false,
+            response: { error: `Unknown tool: ${fc.name}` },
+            scheduling: FunctionResponseScheduling.INTERRUPT,
+          },
+        ],
+      });
     }
   }
 
-  /**
-   * Progressive FC: willContinue で 2-step response
-   * Step 1: 即時 ack (willContinue=true) → Gemini は「確認中です」と言う
-   * Step 2: Brain API 結果 (willContinue=false, INTERRUPT) → Gemini が結果を読み上げ
-   */
   private async handleDelegateToBrainProgressive(
     fcId: string,
     fcName: string,
@@ -110,6 +113,7 @@ export class LiveToolHandler {
           {
             id: fcId,
             name: fcName,
+            willContinue: false,
             response: { success: false, message: "リクエストが必要です。" },
             scheduling: FunctionResponseScheduling.INTERRUPT,
           },
@@ -118,75 +122,87 @@ export class LiveToolHandler {
       return;
     }
 
-    // デバウンス: 同一リクエストの3秒間重複抑制
-    const now = Date.now();
-    if (request === this.lastBrainRequest && now - this.lastBrainTime < 3000) {
-      console.log("[ToolHandler] Debounced duplicate:", request.slice(0, 50));
-      client.sendToolResponse({
-        functionResponses: [
-          {
-            id: fcId,
-            name: fcName,
-            response: {
-              success: true,
-              message: "既に処理中です。少々お待ちください。",
-            },
-            scheduling: FunctionResponseScheduling.WHEN_IDLE,
-          },
-        ],
-      });
-      return;
-    }
-    this.lastBrainRequest = request;
-    this.lastBrainTime = now;
-
-    // Step 1: 即時 ack — Gemini に「まだ結果が来る」と伝える
-    console.log("[ToolHandler] Sending willContinue=true ack for:", request.slice(0, 50));
-    client.sendToolResponse({
-      functionResponses: [
-        {
-          id: fcId,
-          name: fcName,
-          willContinue: true,
-          scheduling: FunctionResponseScheduling.WHEN_IDLE,
-          response: { status: "processing", message: "情報を確認中です。" },
-        },
-      ],
-    });
-
-    // Step 2: Brain API await
-    if (!this.callbacks.onBrainRequested) {
-      client.sendToolResponse({
-        functionResponses: [
-          {
-            id: fcId,
-            name: fcName,
-            willContinue: false,
-            scheduling: FunctionResponseScheduling.INTERRUPT,
-            response: { success: false, message: "Brain 機能が利用できません。" },
-          },
-        ],
-      });
-      return;
-    }
+    this.activeFunctionCallIds.add(fcId);
 
     try {
-      console.log("[ToolHandler] Awaiting brain result...");
-      const brainResult = await this.callbacks.onBrainRequested({ request });
-
-      // キャンセルチェック
-      if (this.cancelledIds.has(fcId)) {
-        console.log("[ToolHandler] FC was cancelled, skipping final response:", fcId);
-        this.cancelledIds.delete(fcId);
+      const now = Date.now();
+      if (request === this.lastBrainRequest && now - this.lastBrainTime < 3000) {
+        console.log("[ToolHandler] Debounced duplicate:", request.slice(0, 50));
+        client.sendToolResponse({
+          functionResponses: [
+            {
+              id: fcId,
+              name: fcName,
+              willContinue: false,
+              response: {
+                success: true,
+                message: "既に同じ依頼を処理中です。少々お待ちください。",
+              },
+              scheduling: FunctionResponseScheduling.WHEN_IDLE,
+            },
+          ],
+        });
         return;
       }
 
-      // Step 3: 最終結果 — INTERRUPT で Gemini の現在の発話を中断
+      this.lastBrainRequest = request;
+      this.lastBrainTime = now;
+
+      console.log(
+        "[ToolHandler] Sending willContinue=true ack for:",
+        request.slice(0, 50)
+      );
+      client.sendToolResponse({
+        functionResponses: [
+          {
+            id: fcId,
+            name: fcName,
+            willContinue: true,
+            scheduling: FunctionResponseScheduling.WHEN_IDLE,
+            response: {
+              status: "processing",
+              message: "情報を確認中です。",
+            },
+          },
+        ],
+      });
+
+      if (!this.callbacks.onBrainRequested) {
+        client.sendToolResponse({
+          functionResponses: [
+            {
+              id: fcId,
+              name: fcName,
+              willContinue: false,
+              scheduling: FunctionResponseScheduling.INTERRUPT,
+              response: {
+                success: false,
+                message: "Brain 機能が利用できません。",
+              },
+            },
+          ],
+        });
+        return;
+      }
+
+      console.log("[ToolHandler] Awaiting brain result...");
+      const brainResult = await this.callbacks.onBrainRequested({ request });
+
+      if (this.cancelledIds.has(fcId)) {
+        console.log(
+          "[ToolHandler] FC was cancelled, skipping final response:",
+          fcId
+        );
+        return;
+      }
+
       const response = brainResult.response_text
         ? { success: true, answer: brainResult.response_text }
-        : { success: false, message: "情報が取得できませんでした。" };
+        : { success: false, message: "情報を取得できませんでした。" };
 
-      console.log("[ToolHandler] Sending final response (willContinue=false, INTERRUPT)");
+      console.log(
+        "[ToolHandler] Sending final response (willContinue=false, INTERRUPT)"
+      );
       client.sendToolResponse({
         functionResponses: [
           {
@@ -216,7 +232,8 @@ export class LiveToolHandler {
           ],
         });
       }
-      this.cancelledIds.delete(fcId);
+    } finally {
+      this.cleanupFunctionCall(fcId);
     }
   }
 }

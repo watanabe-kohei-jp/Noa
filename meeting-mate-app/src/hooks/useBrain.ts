@@ -23,7 +23,12 @@ export interface ThinkingQueueCallbacks {
   addTask: (task: { id: string; label: string; model?: string }) => void;
   updateTask: (
     id: string,
-    update: { status: "completed" | "error"; elapsed_ms?: number }
+    update: {
+      label?: string;
+      model?: string;
+      status: "completed" | "error";
+      elapsed_ms?: number;
+    }
   ) => void;
 }
 
@@ -90,6 +95,7 @@ export function useBrain(
   thinkingQueue?: ThinkingQueueCallbacks
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
+  const inFlightCountRef = useRef(0);
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const thinkingQueueRef = useRef(thinkingQueue);
@@ -100,6 +106,7 @@ export function useBrain(
   const requestBrain = useCallback(
     async (request: { request: string }): Promise<BrainResult> => {
       console.log("[useBrain] requestBrain called:", request);
+      inFlightCountRef.current += 1;
       setIsProcessing(true);
 
       // ThinkingQueue: Brain API 呼び出し開始を通知
@@ -149,9 +156,12 @@ export function useBrain(
 
           if (steps.length > 0) {
             // 最初のタスクを更新
+            const firstStep = steps[0];
             thinkingQueueRef.current?.updateTask(requestId, {
+              label: firstStep.label,
+              model: firstStep.model,
               status: "completed",
-              elapsed_ms: steps[0].elapsed_ms,
+              elapsed_ms: firstStep.elapsed_ms,
             });
           }
 
@@ -211,7 +221,8 @@ export function useBrain(
         });
         return { response_text: "処理中にエラーが発生しました。" };
       } finally {
-        setIsProcessing(false);
+        inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
+        setIsProcessing(inFlightCountRef.current > 0);
       }
     },
     [roomData]
