@@ -702,13 +702,9 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
     if not room_id:
         return JsonRpcResponse(error={"code": -32602, "message": "Invalid params: 'roomId' missing"}, id=request.id)
 
-    # 認証ユーザーの認可チェック
+    # 認証ユーザーの認可チェック（参加者のみ許可）
+    # NOTE: speakerId は diarization ID (speaker_1 等) であり Firebase uid ではないためチェックしない
     uid = user["uid"]
-    if task_payload.speakerId and task_payload.speakerId != uid:
-        return JsonRpcResponse(
-            error={"code": -32600, "message": "speakerId does not match authenticated user"},
-            id=request.id
-        )
     room_ref_check = db.reference(f"rooms/{room_id}")
     room_data_check = room_ref_check.get()
     if not room_data_check or not room_data_check.get("participants", {}).get(uid):
@@ -981,6 +977,12 @@ async def stt_endpoint(
 ):
     """音声ファイルを受信し、設定されたSTTプロバイダーでテキストに変換。
     enable_diarization=true の場合、Google Cloud STT v2 で話者分離を行う。"""
+    # 参加者チェック
+    uid = user["uid"]
+    stt_room_data = db.reference(f"rooms/{room_id}").get()
+    if not stt_room_data or not stt_room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
     from stt_provider import STTProvider
 
     audio_data = await audio.read()
@@ -1035,6 +1037,12 @@ async def stt_endpoint(
 @app.post("/tts", summary="Text-to-speech synthesis")
 async def tts_endpoint(request_data: TTSRequest, user: dict = Depends(get_current_user)):
     """テキストを受信し、設定されたTTSプロバイダーで音声に変換"""
+    # 参加者チェック
+    uid = user["uid"]
+    tts_room_data = db.reference(f"rooms/{request_data.room_id}").get()
+    if not tts_room_data or not tts_room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
     from tts_provider import TTSProvider
 
     room_config = api_key_manager.get_room_config(request_data.room_id)

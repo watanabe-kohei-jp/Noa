@@ -253,7 +253,7 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
     const wsBase = options.wsUrl || getWsBaseUrl();
     const url = `${wsBase}/ws/stt/${encodeURIComponent(roomId)}?token=${encodeURIComponent(token || "")}`;
 
-    console.log("[StreamingSTT] Connecting to", url);
+    console.log("[StreamingSTT] Connecting to", url.replace(/\?token=[^&]*/, "?token=***"));
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
