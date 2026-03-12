@@ -21,7 +21,9 @@ import type { SessionData } from "../../types/data";
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
 import { Modality } from "@google/genai";
-import type { LiveServerToolCall, LiveConnectConfig } from "@google/genai";
+import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
+import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
+import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
 
 // Firebase
 import { ref, push, set } from "firebase/database";
@@ -46,6 +48,7 @@ function LivePanelInner({
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connect, disconnect, volume } =
     useLiveAPIContext();
+  const { addTask, updateTask } = useThinkingQueue();
 
   const [mode, setMode] = useState<LiveMode>("passive");
   const toolHandlerRef = useRef<LiveToolHandler>(new LiveToolHandler());
@@ -59,6 +62,7 @@ function LivePanelInner({
   const tabStreamRef = useRef<MediaStream | null>(null);
 
   // Brain hook (delegate_to_brain meta-tool)
+  const thinkingQueue = useMemo(() => ({ addTask, updateTask }), [addTask, updateTask]);
   const brainCallbacks = useMemo(() => ({
     onTaskCreated: (task: { title: string; assignee?: string; dueDate?: string; priority?: string }) => {
       if (!roomId) return;
@@ -81,7 +85,9 @@ function LivePanelInner({
     },
     onDiagram: () => {},
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks);
+  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue);
+  // NOTE: useBrain は client.send() を使わなくなった（1008 対策）。
+  // Brain 結果は sendToolResponse 経由で Gemini に渡る。
 
   // Accumulate current model turn text (no UI state needed)
   const currentModelTextRef = useRef<string>("");
@@ -131,7 +137,6 @@ function LivePanelInner({
       },
       tools: [
         { functionDeclarations: liveToolDeclarations },
-        { googleSearch: {} },
       ],
       responseModalities: [Modality.AUDIO],
       speechConfig: {
@@ -167,14 +172,20 @@ function LivePanelInner({
       toolHandlerRef.current.handleToolCall(toolCall, client);
     };
 
+    const onToolCallCancellation = (cancellation: LiveServerToolCallCancellation) => {
+      cancellation.ids?.forEach((id) => toolHandlerRef.current.markCancelled(id));
+    };
+
     client.on("content", onContent);
     client.on("turncomplete", onTurnComplete);
     client.on("toolcall", onToolCall);
+    client.on("toolcallcancellation", onToolCallCancellation);
 
     return () => {
       client.off("content", onContent);
       client.off("turncomplete", onTurnComplete);
       client.off("toolcall", onToolCall);
+      client.off("toolcallcancellation", onToolCallCancellation);
     };
   }, [client, syncTranscriptToFirebase]);
 
@@ -297,7 +308,10 @@ function LivePanelInner({
     `${Math.min(vol * 300, 100)}%`;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="relative flex items-center gap-2">
+      {/* ThinkingQueue overlay */}
+      <ThinkingQueuePanel />
+
       {/* Hidden elements for tab capture */}
       <video ref={videoRef} className="hidden" playsInline />
       <canvas ref={canvasRef} className="hidden" />
@@ -442,12 +456,14 @@ export default function LivePanel({
 
   return (
     <LiveAPIProvider options={liveOptions}>
-      <LivePanelInner
-        roomId={roomId}
-        roomData={roomData}
-        sharedStream={sharedStream}
-        currentSessionId={currentSessionId}
-      />
+      <ThinkingQueueProvider>
+        <LivePanelInner
+          roomId={roomId}
+          roomData={roomData}
+          sharedStream={sharedStream}
+          currentSessionId={currentSessionId}
+        />
+      </ThinkingQueueProvider>
     </LiveAPIProvider>
   );
 }

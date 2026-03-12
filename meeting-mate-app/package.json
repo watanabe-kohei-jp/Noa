@@ -12,7 +12,7 @@
     "export": "cross-env NEXT_EXPORT=true next build"
   },
   "dependencies": {
-    "@google/genai": "^0.14.0",
+    "@google/genai": "^1.44.0",
     "@iconify-json/logos": "^1.2.4",
     "@sunwood-ai-labs/duckduckgo-web-search": "^0.1.0",
     "@xyflow/react": "^12.7.0",

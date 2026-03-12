@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import type { GenAILiveClient } from "../lib/genai-live-client";
 import type { SessionData, TranscriptEntry } from "../types/data";
+import type { BrainResult } from "../lib/live-tools/tool-handler";
 
 interface BrainAction {
   action: string;
@@ -15,6 +16,15 @@ interface BrainCallbacks {
     priority?: string;
   }) => void;
   onDiagram?: (mermaidCode: string, title: string) => void;
+}
+
+/** ThinkingQueue にイベントを発行するためのコールバック */
+export interface ThinkingQueueCallbacks {
+  addTask: (task: { id: string; label: string; model?: string }) => void;
+  updateTask: (
+    id: string,
+    update: { status: "completed" | "error"; elapsed_ms?: number }
+  ) => void;
 }
 
 /** Firebase の transcript はオブジェクト ({pushKey: entry}) か配列の可能性がある */
@@ -76,16 +86,29 @@ export function useBrain(
   client: GenAILiveClient,
   connected: boolean,
   roomData: SessionData | null,
-  callbacks?: BrainCallbacks
+  callbacks?: BrainCallbacks,
+  thinkingQueue?: ThinkingQueueCallbacks
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
+  const thinkingQueueRef = useRef(thinkingQueue);
+  thinkingQueueRef.current = thinkingQueue;
 
+  // Brain API を呼び出し、結果を Promise で返す（sendToolResponse 経由で Gemini に戻る）
+  // NOTE: client.send() (sendClientContent) は native audio model の FC を壊すため使わない
   const requestBrain = useCallback(
-    async (request: { request: string }) => {
+    async (request: { request: string }): Promise<BrainResult> => {
       console.log("[useBrain] requestBrain called:", request);
       setIsProcessing(true);
+
+      // ThinkingQueue: Brain API 呼び出し開始を通知
+      const requestId = `brain-${Date.now()}`;
+      thinkingQueueRef.current?.addTask({
+        id: requestId,
+        label: "情報を確認中...",
+      });
+
       try {
         const meetingContext = buildMeetingContext(roomData);
         console.log("[useBrain] calling /api/brain...");
@@ -101,55 +124,61 @@ export function useBrain(
 
         if (!res.ok) {
           console.error("[useBrain] API error:", res.status);
-          if (connected) {
-            client.send(
-              {
-                text: "すみません、情報の取得に失敗しました。もう一度お試しください。",
-              },
-              true
-            );
-          }
-          return;
+          thinkingQueueRef.current?.updateTask(requestId, {
+            status: "error",
+          });
+          return { response_text: "情報の取得に失敗しました。" };
         }
 
         const data = await res.json();
-        console.log("[useBrain] Brain response:", { response_text: data.response_text?.slice(0, 100), actions: data.actions, connected });
+        console.log("[useBrain] Brain response:", {
+          response_text: data.response_text?.slice(0, 100),
+          actions: data.actions,
+          metadata: data.metadata,
+        });
 
-        // テキスト応答を Gemini Live に注入 (Fast Path)
-        if (data.response_text && connected) {
-          console.log("[useBrain] Injecting text via client.send()");
-          client.send(
-            {
-              text: `【Brainからの情報】\n${data.response_text}\n\nこの情報を会議参加者にわかりやすく伝えてください。`,
-            },
-            true
-          );
-        }
+        // ThinkingQueue: metadata から詳細ステップを反映
+        if (data.metadata?.steps) {
+          // 最初の「情報を確認中...」を最初のステップのラベルに更新
+          const steps = data.metadata.steps as Array<{
+            id: string;
+            label: string;
+            model?: string;
+            elapsed_ms?: number;
+          }>;
 
-        // Deep Path: 詳細分析を非同期で並列実行
-        if (data.deep_analysis_pending && data.deep_request) {
-          console.log("[useBrain] Deep analysis pending → calling /api/deep-analysis in background");
-          fetch("/api/deep-analysis", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(data.deep_request),
-          })
-            .then((res) => res.json())
-            .then((deepData) => {
-              if (deepData.analysis && client.status === "connected") {
-                console.log("[useBrain] Deep analysis complete, injecting result");
-                client.send(
-                  {
-                    text: `【詳細分析の結果】\n${deepData.analysis}\n\nこの追加情報を先ほどの回答に補足して伝えてください。`,
-                  },
-                  true
-                );
+          if (steps.length > 0) {
+            // 最初のタスクを更新
+            thinkingQueueRef.current?.updateTask(requestId, {
+              status: "completed",
+              elapsed_ms: steps[0].elapsed_ms,
+            });
+          }
+
+          // 追加ステップをタスクとして追加（既に完了済み）
+          for (let i = 1; i < steps.length; i++) {
+            const step = steps[i];
+            thinkingQueueRef.current?.addTask({
+              id: `${requestId}-${step.id}`,
+              label: step.label,
+              model: step.model,
+            });
+            thinkingQueueRef.current?.updateTask(
+              `${requestId}-${step.id}`,
+              {
+                status: "completed",
+                elapsed_ms: step.elapsed_ms,
               }
-            })
-            .catch((err) => console.error("[useBrain] Deep analysis failed:", err));
+            );
+          }
+        } else {
+          // metadata がない場合は完了扱い
+          thinkingQueueRef.current?.updateTask(requestId, {
+            status: "completed",
+          });
         }
 
-        // アクションの処理
+        // アクションの処理（タスク作成、図生成）
         if (data.actions && Array.isArray(data.actions)) {
           for (const action of data.actions as BrainAction[]) {
             if (action.action === "create_task" && action.data) {
@@ -168,21 +197,24 @@ export function useBrain(
             }
           }
         }
+
+        // Brain の結果を返す（toolResponse 経由で Gemini に渡る）
+        return {
+          response_text: data.response_text || "",
+          actions: data.actions,
+          metadata: data.metadata,
+        };
       } catch (err) {
         console.error("[useBrain] failed:", err);
-        if (connected) {
-          client.send(
-            {
-              text: "すみません、処理中にエラーが発生しました。",
-            },
-            true
-          );
-        }
+        thinkingQueueRef.current?.updateTask(requestId, {
+          status: "error",
+        });
+        return { response_text: "処理中にエラーが発生しました。" };
       } finally {
         setIsProcessing(false);
       }
     },
-    [client, connected, roomData]
+    [roomData]
   );
 
   return { isProcessing, requestBrain };

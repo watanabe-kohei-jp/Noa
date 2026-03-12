@@ -10,9 +10,10 @@ direct_response の場合は Pass 1 のみで完結 (レイテンシ半減)
 import json
 import logging
 import math
+import time
 from datetime import datetime
 
-from config import BRAIN_LLM_MODEL, DEFAULT_GEMINI_API_KEY, get_default_api_key
+from config import BRAIN_LLM_MODEL, ROUTER_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAULT_GEMINI_API_KEY, get_default_api_key
 from knowledge_base import MockKnowledgeBase
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
@@ -51,10 +52,14 @@ TOOL_SELECTION_PROMPT = """あなたは会議AIアシスタント「Noa」のブ
 - generate_diagram: Mermaid記法の図を生成
   args: {{ "description": "図の説明", "diagram_type": "flowchart|sequence|gantt|mindmap|pie" }}
 
-- deep_analysis: 複雑な分析・比較・リスク評価・多角的な検討など、深い思考が必要な質問。複数の観点からの比較、データに基づく分析や予測が必要な場合に選択
+- deep_analysis: 以下のいずれかに該当する質問に使用:
+  (1) 複雑な分析・比較・リスク評価・多角的な検討
+  (2) 最新の事実・データ・時事情報が必要（株価、ニュース、市場動向、政策等）
+  (3) あなたの知識では正確に答えられない可能性がある質問
+  (4) 専門的な知識や深い考察が求められる質問
   args: {{ "question": "分析対象の質問をそのまま記述" }}
 
-- direct_response: ツール不要。あなたの知識や分析力で直接回答
+- direct_response: ツール不要。挨拶・雑談・一般常識・簡単な概念説明など、正確性が問題にならない回答のみ
   args: {{ "response": "回答テキスト（500文字以内、音声読み上げ用）" }}
 
 ## ユーザーリクエスト
@@ -281,6 +286,8 @@ def _extract_transcript_snippet(meeting_context: dict) -> str:
 async def process_brain_request(request: str, meeting_context: dict) -> dict:
     """Brain のメイン処理: ツール選択 → 実行 → 応答生成"""
 
+    t0 = time.perf_counter()
+
     provider = detect_provider(BRAIN_LLM_MODEL)
     api_key = get_default_api_key(provider) or DEFAULT_GEMINI_API_KEY
 
@@ -309,36 +316,87 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
         tool_name = "direct_response"
         tool_args = {}
 
-    # deep_analysis: デュアルパス — Fast Path で即応答 + Deep Path はフロントエンドが非同期実行
+    t_tool_select = time.perf_counter()
+    tool_select_step = {
+        "id": "tool_select",
+        "label": "ツール判定",
+        "model": BRAIN_LLM_MODEL,
+        "elapsed_ms": round((t_tool_select - t0) * 1000),
+    }
+
+    # deep_analysis: Claude Opus で同期実行 → 結果を sendToolResponse 経由で Gemini Live に返す
     if tool_name == "deep_analysis":
-        logger.info("[Brain] deep_analysis selected → dual path: generating fast response")
+        logger.info("[Brain] deep_analysis selected → executing synchronously (Claude Opus)")
+        tool_result = await execute_tool(tool_name, tool_args, meeting_context)
+
+        if tool_result.get("routed") and tool_result.get("analysis"):
+            logger.info(f"[Brain] Deep analysis complete ({len(tool_result['analysis'])} chars)")
+            t_end = time.perf_counter()
+            steps = [tool_select_step]
+            # Router step from deep_analysis
+            steps.append({
+                "id": "router",
+                "label": "ルーティング判定",
+                "model": tool_result.get("router_model", ROUTER_LLM_MODEL),
+                "elapsed_ms": tool_result.get("router_elapsed_ms", 0),
+            })
+            # Analysis step from deep_analysis
+            steps.append({
+                "id": "deep_analysis",
+                "label": "深層分析",
+                "model": tool_result.get("analysis_model", DEEP_ANALYSIS_MODEL),
+                "elapsed_ms": tool_result.get("analysis_elapsed_ms", 0),
+            })
+            return {
+                "response_text": tool_result["analysis"],
+                "actions": [],
+                "metadata": {
+                    "tool_selected": tool_name,
+                    "steps": steps,
+                    "total_elapsed_ms": round((t_end - t0) * 1000),
+                },
+            }
+
+        # Router が "none" 判定 or 分析失敗 → gemini-2.5-flash で直接回答
+        logger.info(f"[Brain] Deep analysis not routed or failed, falling back to direct response")
+        t_fallback_start = time.perf_counter()
         try:
-            quick_response = await llm_complete(
+            response_text = await llm_complete(
                 model=BRAIN_LLM_MODEL,
                 prompt=f"""あなたは会議AIアシスタント「Noa」です。
-以下の質問にまず簡潔に回答してください（100文字以内）。
-より詳しい分析は別途行っています。
+以下の質問に自然な日本語で回答してください。音声読み上げ用なので500文字以内。
 
 質問: {request}
 会議コンテキスト: {context_summary}""",
                 api_key=api_key,
                 temperature=0.7,
-                max_tokens=300,
+                max_tokens=1000,
             )
         except Exception as e:
-            logger.error(f"[Brain] Fast response generation failed: {e}")
-            quick_response = "詳しく分析しています。少々お待ちください。"
-
-        # フロントエンドが /api/deep-analysis を非同期で呼び出すための情報を返す
-        transcript_snippet = _extract_transcript_snippet(meeting_context)
+            logger.error(f"[Brain] Fallback response failed: {e}")
+            response_text = "すみません、分析の生成に失敗しました。"
+        t_end = time.perf_counter()
+        steps = [tool_select_step]
+        # Router step from deep_analysis (even though it decided "none")
+        steps.append({
+            "id": "router",
+            "label": "ルーティング判定",
+            "model": tool_result.get("router_model", ROUTER_LLM_MODEL),
+            "elapsed_ms": tool_result.get("router_elapsed_ms", 0),
+        })
+        steps.append({
+            "id": "fallback_response",
+            "label": "フォールバック応答生成",
+            "model": BRAIN_LLM_MODEL,
+            "elapsed_ms": round((t_end - t_fallback_start) * 1000),
+        })
         return {
-            "response_text": quick_response.strip(),
+            "response_text": response_text.strip(),
             "actions": [],
-            "deep_analysis_pending": True,
-            "deep_request": {
-                "question": request,
-                "meeting_context": context_summary,
-                "transcript_snippet": transcript_snippet,
+            "metadata": {
+                "tool_selected": tool_name,
+                "steps": steps,
+                "total_elapsed_ms": round((t_end - t0) * 1000),
             },
         }
 
@@ -362,16 +420,28 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
             except Exception as e:
                 logger.error(f"[Brain] Direct response generation failed: {e}")
                 response_text = "すみません、回答の生成に失敗しました。"
-        return {"response_text": response_text.strip(), "actions": []}
+        t_end = time.perf_counter()
+        return {
+            "response_text": response_text.strip(),
+            "actions": [],
+            "metadata": {
+                "tool_selected": tool_name,
+                "steps": [tool_select_step],
+                "total_elapsed_ms": round((t_end - t0) * 1000),
+            },
+        }
 
     # ツール実行
+    t_exec_start = time.perf_counter()
     tool_result = await execute_tool(tool_name, tool_args, meeting_context)
+    t_exec_end = time.perf_counter()
     logger.info(f"[Brain] Tool result: {json.dumps(tool_result, ensure_ascii=False)[:200]}")
 
     # アクション抽出
     actions = extract_actions(tool_name, tool_result)
 
     # Pass 2: 応答テキスト生成
+    t_resp_start = time.perf_counter()
     try:
         response_text = await llm_complete(
             model=BRAIN_LLM_MODEL,
@@ -387,5 +457,28 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
     except Exception as e:
         logger.error(f"[Brain] Response generation failed: {e}")
         response_text = "すみません、情報の処理中にエラーが発生しました。"
+    t_end = time.perf_counter()
 
-    return {"response_text": response_text.strip(), "actions": actions}
+    return {
+        "response_text": response_text.strip(),
+        "actions": actions,
+        "metadata": {
+            "tool_selected": tool_name,
+            "steps": [
+                tool_select_step,
+                {
+                    "id": "execute",
+                    "label": "ツール実行",
+                    "model": None,
+                    "elapsed_ms": round((t_exec_end - t_exec_start) * 1000),
+                },
+                {
+                    "id": "response_gen",
+                    "label": "応答生成",
+                    "model": BRAIN_LLM_MODEL,
+                    "elapsed_ms": round((t_end - t_resp_start) * 1000),
+                },
+            ],
+            "total_elapsed_ms": round((t_end - t0) * 1000),
+        },
+    }
