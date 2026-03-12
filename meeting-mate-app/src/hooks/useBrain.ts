@@ -110,7 +110,7 @@ export function useBrain(
       setIsProcessing(true);
 
       // ThinkingQueue: Brain API 呼び出し開始を通知
-      const requestId = `brain-${Date.now()}`;
+      const requestId = `brain-${crypto.randomUUID()}`;
       thinkingQueueRef.current?.addTask({
         id: requestId,
         label: "情報を確認中...",
@@ -120,14 +120,24 @@ export function useBrain(
         const meetingContext = buildMeetingContext(roomData);
         console.log("[useBrain] calling /api/brain...");
 
-        const res = await fetch("/api/brain", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            request: request.request,
-            meeting_context: meetingContext,
-          }),
-        });
+        // 60秒タイムアウト付き fetch
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60_000);
+
+        let res: Response;
+        try {
+          res = await fetch("/api/brain", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              request: request.request,
+              meeting_context: meetingContext,
+            }),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (!res.ok) {
           console.error("[useBrain] API error:", res.status);

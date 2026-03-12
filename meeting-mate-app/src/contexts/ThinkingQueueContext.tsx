@@ -48,7 +48,8 @@ export function ThinkingQueueProvider({ children }: { children: React.ReactNode 
               ...t,
               ...nextTask,
               startedAt: t.startedAt,
-              completedAt: nextTask.completedAt ?? t.completedAt,
+              // running に戻す場合は completedAt をクリア
+              completedAt: nextStatus === "running" ? undefined : (nextTask.completedAt ?? t.completedAt),
             }
           : t
       );

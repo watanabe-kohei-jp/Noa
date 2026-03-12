@@ -42,6 +42,8 @@ export class LiveToolHandler {
   private lastBrainTime = 0;
   private cancelledIds = new Set<string>();
   private activeFunctionCallIds = new Set<string>();
+  /** cancel が activeFunctionCallIds.add() より先に来た場合の先行記録 */
+  private pendingCancellations = new Set<string>();
 
   setContextProvider(provider: MeetingContextProvider) {
     this.contextProvider = provider;
@@ -52,18 +54,20 @@ export class LiveToolHandler {
   }
 
   markCancelled(id: string) {
-    if (!this.activeFunctionCallIds.has(id)) {
-      console.log("[ToolHandler] Ignoring stale cancellation:", id);
-      return;
+    if (this.activeFunctionCallIds.has(id)) {
+      this.cancelledIds.add(id);
+      console.log("[ToolHandler] FC cancelled:", id);
+    } else {
+      // activeFunctionCallIds に登録前 → 先行記録
+      this.pendingCancellations.add(id);
+      console.log("[ToolHandler] FC cancel queued (pending):", id);
     }
-
-    this.cancelledIds.add(id);
-    console.log("[ToolHandler] FC cancelled:", id);
   }
 
   private cleanupFunctionCall(id: string) {
     this.activeFunctionCallIds.delete(id);
     this.cancelledIds.delete(id);
+    this.pendingCancellations.delete(id);
   }
 
   async handleToolCall(toolCall: LiveServerToolCall, client: GenAILiveClient) {
@@ -123,6 +127,14 @@ export class LiveToolHandler {
     }
 
     this.activeFunctionCallIds.add(fcId);
+
+    // 先行キャンセルチェック（cancel が add より先に来たケース）
+    if (this.pendingCancellations.has(fcId)) {
+      console.log("[ToolHandler] FC was pre-cancelled:", fcId);
+      this.pendingCancellations.delete(fcId);
+      this.cleanupFunctionCall(fcId);
+      return;
+    }
 
     try {
       const now = Date.now();
@@ -190,9 +202,24 @@ export class LiveToolHandler {
 
       if (this.cancelledIds.has(fcId)) {
         console.log(
-          "[ToolHandler] FC was cancelled, skipping final response:",
+          "[ToolHandler] FC was cancelled, closing willContinue cycle:",
           fcId
         );
+        // willContinue: true を送済みなので、必ず false で閉じる
+        client.sendToolResponse({
+          functionResponses: [
+            {
+              id: fcId,
+              name: fcName,
+              willContinue: false,
+              scheduling: FunctionResponseScheduling.WHEN_IDLE,
+              response: {
+                success: false,
+                message: "リクエストがキャンセルされました。",
+              },
+            },
+          ],
+        });
         return;
       }
 
@@ -216,22 +243,25 @@ export class LiveToolHandler {
       });
     } catch (err) {
       console.error("[ToolHandler] Brain request failed:", err);
-      if (!this.cancelledIds.has(fcId)) {
-        client.sendToolResponse({
-          functionResponses: [
-            {
-              id: fcId,
-              name: fcName,
-              willContinue: false,
-              scheduling: FunctionResponseScheduling.INTERRUPT,
-              response: {
-                success: false,
-                message: "情報取得中にエラーが発生しました。",
-              },
+      // willContinue: true を送済みなので、キャンセル/エラーどちらでも false で閉じる
+      client.sendToolResponse({
+        functionResponses: [
+          {
+            id: fcId,
+            name: fcName,
+            willContinue: false,
+            scheduling: this.cancelledIds.has(fcId)
+              ? FunctionResponseScheduling.WHEN_IDLE
+              : FunctionResponseScheduling.INTERRUPT,
+            response: {
+              success: false,
+              message: this.cancelledIds.has(fcId)
+                ? "リクエストがキャンセルされました。"
+                : "情報取得中にエラーが発生しました。",
             },
-          ],
-        });
-      }
+          },
+        ],
+      });
     } finally {
       this.cleanupFunctionCall(fcId);
     }
