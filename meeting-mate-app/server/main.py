@@ -274,8 +274,8 @@ async def end_session_endpoint(req: EndSessionRequest, background_tasks: Backgro
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    from meeting_memory import MeetingMemory
-    memory = MeetingMemory()
+    from meeting_memory import get_meeting_memory
+    memory = get_meeting_memory()
     background_tasks.add_task(
         memory.process_ended_session,
         req.room_id,

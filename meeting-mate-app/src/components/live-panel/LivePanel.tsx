@@ -85,7 +85,7 @@ function LivePanelInner({
     },
     onDiagram: () => {},
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue);
+  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
   // NOTE: useBrain は client.send() を使わなくなった（1008 対策）。
   // Brain 結果は sendToolResponse 経由で Gemini に渡る。
 

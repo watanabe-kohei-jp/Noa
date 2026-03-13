@@ -17,12 +17,11 @@ from config import BRAIN_LLM_MODEL, ROUTER_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAU
 from knowledge_base import MockKnowledgeBase
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
-from meeting_memory import MeetingMemory
+from meeting_memory import get_meeting_memory
 
 logger = logging.getLogger(__name__)
 
 kb = MockKnowledgeBase()
-meeting_memory = MeetingMemory()
 
 # ================================================================
 # Prompts
@@ -209,7 +208,11 @@ async def execute_tool(tool_name: str, args: dict, meeting_context: dict) -> dic
         query = args.get("query", "")
         if not query:
             return {"found": False, "message": "検索クエリが必要です。"}
-        results = await meeting_memory.search(query)
+        room_id = meeting_context.get("room_id", "")
+        if not room_id:
+            return {"found": False, "message": "ルーム情報がありません。"}
+        memory = get_meeting_memory()
+        results = await memory.search(query, room_id=room_id)
         if not results:
             return {"found": False, "message": "過去の会議データが見つかりませんでした。まだ終了した会議がないか、関連するデータがありません。"}
         return {

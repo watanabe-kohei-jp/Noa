@@ -46,13 +46,15 @@ function toArray<T>(raw: unknown): T[] {
 }
 
 function buildMeetingContext(
-  roomData: SessionData | null
+  roomData: SessionData | null,
+  roomId?: string | null,
 ): Record<string, unknown> {
   if (!roomData) return {};
   const transcriptArr = toTranscriptArray(roomData.transcript);
   const tasksArr = toArray<SessionData["tasks"][number]>(roomData.tasks);
   const notesArr = toArray<SessionData["notes"][number]>(roomData.notes);
   return {
+    room_id: roomId || "",
     title: roomData.sessionTitle || roomData.projectTitle || "",
     participants: Object.entries(roomData.participants || {}).map(
       ([id, p]) => ({ id, name: p.name, role: p.role })
@@ -87,7 +89,8 @@ export function useBrain(
   connected: boolean,
   roomData: SessionData | null,
   callbacks?: BrainCallbacks,
-  thinkingQueue?: ThinkingQueueCallbacks
+  thinkingQueue?: ThinkingQueueCallbacks,
+  roomId?: string | null,
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
   const callbacksRef = useRef(callbacks);
@@ -110,7 +113,7 @@ export function useBrain(
       });
 
       try {
-        const meetingContext = buildMeetingContext(roomData);
+        const meetingContext = buildMeetingContext(roomData, roomId);
         console.log("[useBrain] calling /api/brain...");
 
         const res = await fetch("/api/brain", {
@@ -214,7 +217,7 @@ export function useBrain(
         setIsProcessing(false);
       }
     },
-    [roomData]
+    [roomData, roomId]
   );
 
   return { isProcessing, requestBrain };

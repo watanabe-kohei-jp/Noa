@@ -49,6 +49,21 @@ SUMMARY_PROMPT = """以下の会議セッションのデータから、構造化
 5. キーワード: 検索用キーワード (カンマ区切り、5-10個)"""
 
 
+_instance: Optional["MeetingMemory"] = None
+
+
+def get_meeting_memory() -> "MeetingMemory":
+    """MeetingMemory のシングルトンインスタンスを返す"""
+    global _instance
+    if _instance is None:
+        _instance = MeetingMemory()
+    return _instance
+
+
+# 検索結果の距離しきい値 (cosine distance: 0=完全一致, 2=真逆)
+MAX_SEARCH_DISTANCE = 0.8
+
+
 class MeetingMemory:
     """セッション横断メモリ - 要約生成・ベクトル検索"""
 
@@ -193,7 +208,7 @@ class MeetingMemory:
         metadata: dict,
     ) -> None:
         """要約をベクトル化して ChromaDB に保存 + Firebase にも保存"""
-        doc_id = f"{room_id}_{session_id}"
+        doc_id = f"{room_id}::{session_id}"
 
         # Embedding 生成
         embedding = self._get_embedding(summary)
@@ -217,10 +232,10 @@ class MeetingMemory:
     async def search(
         self,
         query: str,
-        room_id: Optional[str] = None,
+        room_id: str,
         n_results: int = 3,
     ) -> list[dict]:
-        """クエリで過去の会議要約を検索"""
+        """クエリで過去の会議要約を検索（room_id スコープ必須）"""
         if not query:
             return []
 
@@ -233,19 +248,22 @@ class MeetingMemory:
         kwargs: dict = {
             "query_embeddings": [query_embedding],
             "n_results": min(n_results, self.collection.count()),
+            "where": {"room_id": room_id},
         }
-        if room_id:
-            kwargs["where"] = {"room_id": room_id}
 
         results = self.collection.query(**kwargs)
 
         formatted = []
         if results and results["ids"] and results["ids"][0]:
             for i, doc_id in enumerate(results["ids"][0]):
+                distance = results["distances"][0][i] if results["distances"] else None
+                # 距離しきい値フィルタ: 無関係な結果を除外
+                if distance is not None and distance > MAX_SEARCH_DISTANCE:
+                    continue
                 entry = {
                     "id": doc_id,
                     "summary": results["documents"][0][i] if results["documents"] else "",
-                    "distance": results["distances"][0][i] if results["distances"] else None,
+                    "distance": distance,
                 }
                 if results["metadatas"] and results["metadatas"][0]:
                     entry["metadata"] = results["metadatas"][0][i]
@@ -255,10 +273,19 @@ class MeetingMemory:
 
     async def process_ended_session(self, room_id: str, session_id: str) -> dict:
         """セッション終了時の一連の処理: 要約生成 → 保存 → ベクトル化"""
-        # ステータス追跡
         status_ref = firebase_db.reference(
             f"rooms/{room_id}/sessions/{session_id}/summary_status"
         )
+
+        # Idempotency guard: 処理中 or 完了済みならスキップ
+        current_status = status_ref.get()
+        if current_status in ("processing", "completed"):
+            logger.info(
+                f"[MeetingMemory] Skipped (already {current_status}): "
+                f"{room_id}/{session_id}"
+            )
+            return {"status": "skipped", "reason": f"already {current_status}"}
+
         status_ref.set("processing")
 
         try:
@@ -284,5 +311,5 @@ class MeetingMemory:
                 f"[MeetingMemory] Failed for {room_id}/{session_id}: {e}",
                 exc_info=True,
             )
-            status_ref.set(f"error: {str(e)[:200]}")
+            status_ref.set("error")
             return {"status": "error", "error": str(e)}
