@@ -173,7 +173,7 @@ export class LiveToolHandler {
             scheduling: FunctionResponseScheduling.WHEN_IDLE,
             response: {
               status: "processing",
-              message: "情報を確認中です。",
+              message: "情報を確認しています。少々お待ちください。",
             },
           },
         ],
