@@ -54,6 +54,10 @@ const nextConfig: NextConfig = {
           source: '/api/brain',
           destination: `${BACKEND_URL}/api/brain`,
         },
+        {
+          source: '/api/sessions/:path*',
+          destination: `${BACKEND_URL}/api/sessions/:path*`,
+        },
       ];
     },
   }),

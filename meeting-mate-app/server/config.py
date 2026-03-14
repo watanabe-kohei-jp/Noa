@@ -31,6 +31,12 @@ ROUTER_LLM_MODEL = os.environ.get("ROUTER_LLM_MODEL", "gemini-2.5-flash")
 DEEP_ANALYSIS_MODEL = os.environ.get("DEEP_ANALYSIS_MODEL", "claude-opus-4-6")
 
 # ============================================================
+# Meeting Memory (RAG) 設定
+# ============================================================
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-004")
+CHROMA_PERSIST_DIR = os.path.join(os.path.dirname(__file__), "chroma_data")
+
+# ============================================================
 # 後方互換: 旧 Vertex AI 設定 (非推奨)
 # ============================================================
 PROJECT_ID = os.environ.get("PROJECT_ID")

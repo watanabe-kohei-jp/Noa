@@ -264,6 +264,34 @@ async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_use
 
 
 # ================================================================
+# Endpoints: Session Memory (RAG)
+# ================================================================
+
+
+class EndSessionRequest(BaseModel):
+    room_id: str
+    session_id: str
+
+
+@app.post("/api/sessions/end", summary="セッション終了処理 (要約生成+RAG保存)")
+async def end_session_endpoint(req: EndSessionRequest, background_tasks: BackgroundTasks):
+    """セッション終了時にバックグラウンドで要約生成・ベクトル化を実行"""
+    session_ref = db.reference(f"rooms/{req.room_id}/sessions/{req.session_id}")
+    session_data = session_ref.get()
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from meeting_memory import get_meeting_memory
+    memory = get_meeting_memory()
+    background_tasks.add_task(
+        memory.process_ended_session,
+        req.room_id,
+        req.session_id,
+    )
+    return {"status": "processing", "message": "要約生成をバックグラウンドで開始しました"}
+
+
+# ================================================================
 # Endpoints: join_room, add_message
 # ================================================================
 

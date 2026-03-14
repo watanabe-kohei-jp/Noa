@@ -372,6 +372,13 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     const endedRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/endedAt`);
     set(statusRef, "ended");
     set(endedRef, new Date().toISOString());
+
+    // バックエンドで要約生成+RAG保存をトリガー (fire-and-forget)
+    fetch("/api/sessions/end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, session_id: sessionId }),
+    }).catch(err => console.error("[useRoomData] Failed to trigger session summary:", err));
   }, [roomId]);
 
   // participantsロード後にpageCurrentUser.nameを更新
