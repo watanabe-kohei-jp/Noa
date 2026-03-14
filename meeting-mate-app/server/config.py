@@ -28,7 +28,7 @@ BRAIN_LLM_MODEL = os.environ.get("BRAIN_LLM_MODEL", "gemini-2.5-flash")
 
 # Deep Analysis (Supervisor パターン - Deep Path)
 ROUTER_LLM_MODEL = os.environ.get("ROUTER_LLM_MODEL", "gemini-2.5-flash")
-DEEP_ANALYSIS_MODEL = os.environ.get("DEEP_ANALYSIS_MODEL", "gemini-2.5-flash")
+DEEP_ANALYSIS_MODEL = os.environ.get("DEEP_ANALYSIS_MODEL", "claude-opus-4-6")
 
 # ============================================================
 # 後方互換: 旧 Vertex AI 設定 (非推奨)

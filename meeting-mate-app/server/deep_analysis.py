@@ -1,41 +1,18 @@
 """
-Deep Analysis モジュール - Supervisor パターン
+Deep Analysis モジュール
 
-2段階処理:
-1. Router LLM (Flash Lite) - 質問の複雑さを判定
-2. Deep Analysis LLM (Claude/GPT-4o) - 詳細分析を実行
+Brain Pass 1 が deep_analysis を選択した時点で直接 Claude Opus を呼び出す。
+（Router LLM によるダブルチェックは廃止 — Brain の判断を信頼する設計）
 """
 import logging
+import time
 from config import (
-    ROUTER_LLM_MODEL, DEEP_ANALYSIS_MODEL,
+    DEEP_ANALYSIS_MODEL,
     DEFAULT_GEMINI_API_KEY, get_default_api_key,
 )
-from llm_provider import llm_complete, detect_provider
+from llm_provider import llm_complete_with_tools, detect_provider
 
 logger = logging.getLogger(__name__)
-
-ROUTER_PROMPT_TEMPLATE = """あなたは会議AIアシスタントのルーターです。
-質問が「深層分析」を必要とするか判定してください。
-
-## "analyze" にする条件（すべて満たす場合のみ）
-- 複数の観点からの比較・検討が必要
-- データに基づく分析や予測が必要
-- 単純な回答では不十分な複雑さがある
-- 例: 「3つのシナリオで分析して」「A案とB案を比較して」「リスク評価して」
-
-## "none" にする条件（1つでも当てはまれば）
-- 事実の確認（今何時？、参加者は誰？）
-- 一般知識で即答できる（〇〇の意味は？）
-- 単純な計算や要約
-- 雑談・挨拶
-
-## 質問
-{question}
-
-## 会議コンテキスト
-{meeting_context}
-
-"analyze" または "none" の1単語のみ回答:"""
 
 ANALYSIS_PROMPT_TEMPLATE = """あなたは会議AIアシスタント「Noa」の分析エンジンです。
 会議の参加者に提供するための、深い分析を行ってください。
@@ -63,43 +40,14 @@ async def route_and_analyze(
     meeting_context: str = "",
     transcript_snippet: str = "",
 ) -> dict:
-    """質問をルーティングし、必要なら深層分析を実行する"""
+    """Deep Analysis LLM で直接分析を実行する"""
 
-    # Step 1: Router LLM で判定
-    router_provider = detect_provider(ROUTER_LLM_MODEL)
-    router_api_key = get_default_api_key(router_provider) or DEFAULT_GEMINI_API_KEY
-
-    try:
-        routing_result = await llm_complete(
-            model=ROUTER_LLM_MODEL,
-            prompt=ROUTER_PROMPT_TEMPLATE.format(
-                question=question,
-                meeting_context=meeting_context or "(なし)",
-            ),
-            api_key=router_api_key,
-            temperature=0.0,
-            max_tokens=50,
-        )
-        routing = routing_result.strip().lower().strip('"').strip("'")
-        logger.info(f"[DeepAnalysis] Router raw={repr(routing_result)} parsed={routing}")
-        # Gemini の thinking モードで空レスポンスになることがある → analyze にフォールバック
-        if not routing:
-            logger.warning("[DeepAnalysis] Router returned empty, defaulting to 'analyze'")
-            routing = "analyze"
-    except Exception as e:
-        logger.error(f"[DeepAnalysis] Router failed: {e}")
-        # Router が失敗した場合はスキップ（クォータ節約）
-        routing = "none"
-
-    if routing != "analyze":
-        return {"routed": False, "reason": "simple question - no deep analysis needed"}
-
-    # Step 2: Deep Analysis LLM で分析実行
     analysis_provider = detect_provider(DEEP_ANALYSIS_MODEL)
     analysis_api_key = get_default_api_key(analysis_provider) or DEFAULT_GEMINI_API_KEY
 
+    t_analysis_start = time.perf_counter()
     try:
-        analysis = await llm_complete(
+        analysis = await llm_complete_with_tools(
             model=DEEP_ANALYSIS_MODEL,
             prompt=ANALYSIS_PROMPT_TEMPLATE.format(
                 question=question,
@@ -111,7 +59,22 @@ async def route_and_analyze(
             max_tokens=1000,
         )
         logger.info(f"[DeepAnalysis] Analysis complete ({len(analysis)} chars)")
-        return {"routed": True, "analysis": analysis.strip()}
+        t_analysis_end = time.perf_counter()
+        analysis_elapsed_ms = round((t_analysis_end - t_analysis_start) * 1000)
+        return {
+            "routed": True,
+            "analysis": analysis.strip(),
+            "analysis_model": DEEP_ANALYSIS_MODEL,
+            "analysis_elapsed_ms": analysis_elapsed_ms,
+        }
     except Exception as e:
         logger.error(f"[DeepAnalysis] Analysis failed: {e}")
-        return {"routed": True, "analysis": None, "error": str(e)}
+        t_analysis_end = time.perf_counter()
+        analysis_elapsed_ms = round((t_analysis_end - t_analysis_start) * 1000)
+        return {
+            "routed": True,
+            "analysis": None,
+            "error": str(e),
+            "analysis_model": DEEP_ANALYSIS_MODEL,
+            "analysis_elapsed_ms": analysis_elapsed_ms,
+        }

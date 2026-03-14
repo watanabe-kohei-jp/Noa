@@ -22,7 +22,9 @@ import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
 import { authFetch } from "../../lib/api-client";
 import { Modality } from "@google/genai";
-import type { LiveServerToolCall, LiveConnectConfig } from "@google/genai";
+import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
+import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
+import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
 
 // Firebase
 import { ref, push, set } from "firebase/database";
@@ -47,12 +49,14 @@ function LivePanelInner({
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connect, disconnect, volume } =
     useLiveAPIContext();
+  const { addTask, updateTask } = useThinkingQueue();
 
   const [mode, setMode] = useState<LiveMode>("passive");
   const toolHandlerRef = useRef<LiveToolHandler>(new LiveToolHandler());
 
   // Audio recording (merged from LiveControlTray)
   const [inVolume, setInVolume] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [tabAudioActive, setTabAudioActive] = useState(false);
   const [audioRecorder] = useState(() => new AudioRecorder());
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -60,6 +64,7 @@ function LivePanelInner({
   const tabStreamRef = useRef<MediaStream | null>(null);
 
   // Brain hook (delegate_to_brain meta-tool)
+  const thinkingQueue = useMemo(() => ({ addTask, updateTask }), [addTask, updateTask]);
   const brainCallbacks = useMemo(() => ({
     onTaskCreated: (task: { title: string; assignee?: string; dueDate?: string; priority?: string }) => {
       if (!roomId) return;
@@ -82,7 +87,9 @@ function LivePanelInner({
     },
     onDiagram: () => {},
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks);
+  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue);
+  // NOTE: useBrain は client.send() を使わなくなった（1008 対策）。
+  // Brain 結果は sendToolResponse 経由で Gemini に渡る。
 
   // Accumulate current model turn text (no UI state needed)
   const currentModelTextRef = useRef<string>("");
@@ -132,7 +139,6 @@ function LivePanelInner({
       },
       tools: [
         { functionDeclarations: liveToolDeclarations },
-        { googleSearch: {} },
       ],
       responseModalities: [Modality.AUDIO],
       speechConfig: {
@@ -168,14 +174,20 @@ function LivePanelInner({
       toolHandlerRef.current.handleToolCall(toolCall, client);
     };
 
+    const onToolCallCancellation = (cancellation: LiveServerToolCallCancellation) => {
+      cancellation.ids?.forEach((id) => toolHandlerRef.current.markCancelled(id));
+    };
+
     client.on("content", onContent);
     client.on("turncomplete", onTurnComplete);
     client.on("toolcall", onToolCall);
+    client.on("toolcallcancellation", onToolCallCancellation);
 
     return () => {
       client.off("content", onContent);
       client.off("turncomplete", onTurnComplete);
       client.off("toolcall", onToolCall);
+      client.off("toolcallcancellation", onToolCallCancellation);
     };
   }, [client, syncTranscriptToFirebase]);
 
@@ -193,8 +205,12 @@ function LivePanelInner({
       audioRecorder
         .on("data", onData)
         .on("volume", setInVolume)
+        .on("vad", (speaking: boolean) => setIsSpeaking(speaking))
         .start(sharedStream)
-        .then(() => console.log("[LivePanel] audioRecorder started OK"))
+        .then(() => {
+          audioRecorder.setVadEnabled(true);
+          console.log("[LivePanel] audioRecorder started OK (VAD enabled)");
+        })
         .catch((err: unknown) =>
           console.warn("[LivePanel] audioRecorder start failed:", err)
         );
@@ -203,7 +219,8 @@ function LivePanelInner({
     }
 
     return () => {
-      audioRecorder.off("data", onData).off("volume", setInVolume);
+      audioRecorder.off("data", onData).off("volume", setInVolume).off("vad");
+      setIsSpeaking(false);
     };
   }, [connected, client, sharedStream, audioRecorder]);
 
@@ -298,7 +315,10 @@ function LivePanelInner({
     `${Math.min(vol * 300, 100)}%`;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="relative flex items-center gap-2">
+      {/* ThinkingQueue overlay */}
+      <ThinkingQueuePanel />
+
       {/* Hidden elements for tab capture */}
       <video ref={videoRef} className="hidden" playsInline />
       <canvas ref={canvasRef} className="hidden" />
@@ -312,12 +332,15 @@ function LivePanelInner({
       {/* Connect / Disconnect */}
       <button
         onClick={connected ? disconnect : connect}
+        disabled={!connected && !sharedStream}
         className={`p-2 rounded-xl transition-all ${
           connected
             ? "bg-red-500 hover:bg-red-600 text-white"
-            : "bg-green-500 hover:bg-green-600 text-white"
+            : !sharedStream
+              ? "bg-gray-300 text-gray-500 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500"
+              : "bg-green-500 hover:bg-green-600 text-white"
         }`}
-        title={connected ? "Live AI 切断" : "Live AI 接続"}
+        title={connected ? "Live AI 切断" : !sharedStream ? "先にマイクをONにしてください" : "Live AI 接続"}
       >
         {connected ? <PhoneOff size={16} /> : <Phone size={16} />}
       </button>
@@ -367,9 +390,15 @@ function LivePanelInner({
         </span>
       )}
 
-      {/* Volume indicators (compact) */}
+      {/* Volume indicators (compact) + VAD indicator */}
       {connected && (
         <div className="flex items-center gap-1 flex-shrink-0">
+          <span
+            className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${
+              isSpeaking ? "bg-green-500" : "bg-gray-400"
+            }`}
+            title={isSpeaking ? "発話検出中" : "無音"}
+          />
           <div className="w-8 h-1.5 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
             <div
               className="h-full bg-green-500 transition-all duration-75"
@@ -443,12 +472,14 @@ export default function LivePanel({
 
   return (
     <LiveAPIProvider options={liveOptions}>
-      <LivePanelInner
-        roomId={roomId}
-        roomData={roomData}
-        sharedStream={sharedStream}
-        currentSessionId={currentSessionId}
-      />
+      <ThinkingQueueProvider>
+        <LivePanelInner
+          roomId={roomId}
+          roomData={roomData}
+          sharedStream={sharedStream}
+          currentSessionId={currentSessionId}
+        />
+      </ThinkingQueueProvider>
     </LiveAPIProvider>
   );
 }

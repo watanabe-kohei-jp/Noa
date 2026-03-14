@@ -46,6 +46,8 @@ interface UseStreamingSTTOptions {
   maxSpeakers?: number;
   /** サンプルレート */
   sampleRate?: number;
+  /** VAD を有効にするか (デフォルト false — STT は連続時間前提のため) */
+  vadEnabled?: boolean;
   /** interim 結果のコールバック */
   onInterim?: (result: STTResult) => void;
   /** final 結果のコールバック */
@@ -198,6 +200,11 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
 
       const worklet = new AudioWorkletNode(ctx, workletName);
       workletRef.current = worklet;
+
+      // VAD 有効化（オプション — デフォルト無効）
+      if (options.vadEnabled) {
+        worklet.port.postMessage({ vadEnabled: true });
+      }
 
       worklet.port.onmessage = (ev: MessageEvent) => {
         const arrayBuffer = ev.data.data?.int16arrayBuffer;
