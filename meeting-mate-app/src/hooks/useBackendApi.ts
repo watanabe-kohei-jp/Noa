@@ -1,6 +1,7 @@
 // meeting-mate-app/src/hooks/useBackendApi.ts
 import { useCallback } from 'react';
 import { TranscriptEntry, generateUniqueId } from '@/types/data'; // generateUniqueId も型定義ファイルからインポート
+import { authFetch } from '../lib/api-client';
 
 interface BackendApiResponse {
   result?: {
@@ -43,7 +44,7 @@ export const useBackendApi = (): UseBackendApiResult => {
     // Firebase Hosting rewritesまたはNext.js dev proxyを使用して相対URLでAPI呼び出し
     const fullUrl = `/invoke`;
     console.log(`Attempting to fetch from: ${fullUrl}`); // デバッグログは残す
-    const response = await fetch(fullUrl, {
+    const response = await authFetch(fullUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(requestBody)

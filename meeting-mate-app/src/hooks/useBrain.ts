@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { GenAILiveClient } from "../lib/genai-live-client";
 import type { SessionData, TranscriptEntry } from "../types/data";
 import type { BrainResult } from "../lib/live-tools/tool-handler";
+import { authFetch } from "../lib/api-client";
 
 interface BrainAction {
   action: string;
@@ -120,13 +121,13 @@ export function useBrain(
         const meetingContext = buildMeetingContext(roomData);
         console.log("[useBrain] calling /api/brain...");
 
-        // 60秒タイムアウト付き fetch
+        // 60秒タイムアウト付き authFetch
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
         let res: Response;
         try {
-          res = await fetch("/api/brain", {
+          res = await authFetch("/api/brain", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

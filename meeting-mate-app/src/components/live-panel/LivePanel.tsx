@@ -20,6 +20,7 @@ import type { LiveMode } from "../../types/live-api";
 import type { SessionData } from "../../types/data";
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
+import { authFetch } from "../../lib/api-client";
 import { Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
 import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
@@ -437,7 +438,7 @@ export default function LivePanel({
   const [keyError, setKeyError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/config")
+    authFetch("/api/config")
       .then((res) => res.json())
       .then((data) => {
         if (data.geminiApiKey) {
