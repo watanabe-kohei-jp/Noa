@@ -110,13 +110,11 @@ def load_session_data(room_id: str) -> Optional[Dict[str, Any]]:
             return new_room_data
         else:
             # 既存データにデフォルトキーが不足している場合、補完する
-            updated = False
             for key, default_value in DEFAULT_ROOM_STRUCTURE.items():
                 if key not in room_data:
                     logger.warning(
                         f"Key '{key}' missing in room '{room_id}'. Initializing with default.")
                     room_data[key] = default_value
-                    updated = True
             # if updated:
             #     # キーが不足していた場合、補完したデータでDBを更新する処理を一旦コメントアウト
             #     # この処理が意図しないデータ上書きを引き起こす可能性があるため。

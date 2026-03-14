@@ -10,6 +10,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { audioContext } from "@/lib/audio-utils";
 import AudioRecordingWorklet from "@/lib/worklets/audio-processing";
 import { createWorketFromSrc } from "@/lib/audioworklet-registry";
+import { getAuthToken } from "../lib/api-client";
 
 // --- Types ---
 
@@ -45,6 +46,8 @@ interface UseStreamingSTTOptions {
   maxSpeakers?: number;
   /** サンプルレート */
   sampleRate?: number;
+  /** VAD を有効にするか (デフォルト false — STT は連続時間前提のため) */
+  vadEnabled?: boolean;
   /** interim 結果のコールバック */
   onInterim?: (result: STTResult) => void;
   /** final 結果のコールバック */
@@ -57,7 +60,7 @@ interface UseStreamingSTTOptions {
 
 interface UseStreamingSTTReturn {
   /** STT ストリーミングを開始 */
-  startSTT: () => void;
+  startSTT: () => void | Promise<void>;
   /** STT ストリーミングを停止 */
   stopSTT: () => void;
   /** 接続中かどうか */
@@ -198,6 +201,11 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
       const worklet = new AudioWorkletNode(ctx, workletName);
       workletRef.current = worklet;
 
+      // VAD 有効化（オプション — デフォルト無効）
+      if (options.vadEnabled) {
+        worklet.port.postMessage({ vadEnabled: true });
+      }
+
       worklet.port.onmessage = (ev: MessageEvent) => {
         const arrayBuffer = ev.data.data?.int16arrayBuffer;
         if (arrayBuffer && ws.readyState === WebSocket.OPEN) {
@@ -227,7 +235,7 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
     audioCtxRef.current = null;
   }, []);
 
-  const startSTT = useCallback(() => {
+  const startSTT = useCallback(async () => {
     // streamRef から最新の stream を取得 (stale closure 対策)
     const currentStream = streamRef.current;
 
@@ -248,10 +256,11 @@ export function useStreamingSTT(options: UseStreamingSTTOptions): UseStreamingST
     }
 
     pendingStartRef.current = false;
+    const token = await getAuthToken();
     const wsBase = options.wsUrl || getWsBaseUrl();
-    const url = `${wsBase}/ws/stt/${encodeURIComponent(roomId)}`;
+    const url = `${wsBase}/ws/stt/${encodeURIComponent(roomId)}?token=${encodeURIComponent(token || "")}`;
 
-    console.log("[StreamingSTT] Connecting to", url);
+    console.log("[StreamingSTT] Connecting to", url.replace(/\?token=[^&]*/, "?token=***"));
     const ws = new WebSocket(url);
     wsRef.current = ws;
 

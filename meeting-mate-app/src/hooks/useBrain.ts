@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { GenAILiveClient } from "../lib/genai-live-client";
 import type { SessionData, TranscriptEntry } from "../types/data";
 import type { BrainResult } from "../lib/live-tools/tool-handler";
+import { authFetch } from "../lib/api-client";
 
 interface BrainAction {
   action: string;
@@ -23,7 +24,12 @@ export interface ThinkingQueueCallbacks {
   addTask: (task: { id: string; label: string; model?: string }) => void;
   updateTask: (
     id: string,
-    update: { status: "completed" | "error"; elapsed_ms?: number }
+    update: {
+      label?: string;
+      model?: string;
+      status: "completed" | "error";
+      elapsed_ms?: number;
+    }
   ) => void;
 }
 
@@ -93,6 +99,7 @@ export function useBrain(
   roomId?: string | null,
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
+  const inFlightCountRef = useRef(0);
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const thinkingQueueRef = useRef(thinkingQueue);
@@ -103,10 +110,11 @@ export function useBrain(
   const requestBrain = useCallback(
     async (request: { request: string }): Promise<BrainResult> => {
       console.log("[useBrain] requestBrain called:", request);
+      inFlightCountRef.current += 1;
       setIsProcessing(true);
 
       // ThinkingQueue: Brain API 呼び出し開始を通知
-      const requestId = `brain-${Date.now()}`;
+      const requestId = `brain-${crypto.randomUUID()}`;
       thinkingQueueRef.current?.addTask({
         id: requestId,
         label: "情報を確認中...",
@@ -116,14 +124,24 @@ export function useBrain(
         const meetingContext = buildMeetingContext(roomData, roomId);
         console.log("[useBrain] calling /api/brain...");
 
-        const res = await fetch("/api/brain", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            request: request.request,
-            meeting_context: meetingContext,
-          }),
-        });
+        // 60秒タイムアウト付き authFetch
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60_000);
+
+        let res: Response;
+        try {
+          res = await authFetch("/api/brain", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              request: request.request,
+              meeting_context: meetingContext,
+            }),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (!res.ok) {
           console.error("[useBrain] API error:", res.status);
@@ -152,9 +170,12 @@ export function useBrain(
 
           if (steps.length > 0) {
             // 最初のタスクを更新
+            const firstStep = steps[0];
             thinkingQueueRef.current?.updateTask(requestId, {
+              label: firstStep.label,
+              model: firstStep.model,
               status: "completed",
-              elapsed_ms: steps[0].elapsed_ms,
+              elapsed_ms: firstStep.elapsed_ms,
             });
           }
 
@@ -214,7 +235,8 @@ export function useBrain(
         });
         return { response_text: "処理中にエラーが発生しました。" };
       } finally {
-        setIsProcessing(false);
+        inFlightCountRef.current = Math.max(0, inFlightCountRef.current - 1);
+        setIsProcessing(inFlightCountRef.current > 0);
       }
     },
     [roomData, roomId]

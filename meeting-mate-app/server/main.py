@@ -4,8 +4,7 @@ from __future__ import annotations
 # マルチプロバイダー LLM 設定
 from config import (
     DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT,
-    AGENT_CONFIG_DIR, MAX_ITERATIONS, MAX_RETRY_ATTEMPTS,
-    DEFAULT_GEMINI_API_KEY, get_default_api_key, logger as config_logger
+    AGENT_CONFIG_DIR, DEFAULT_GEMINI_API_KEY, get_default_api_key
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
@@ -15,20 +14,20 @@ from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
-from file_utils import load_json, save_json, ensure_dir_exists
 from firebase_admin import credentials, auth as firebase_auth, db
 import firebase_admin
 import os
 import json
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import logging
 from datetime import datetime, timedelta
 from api_key_manager import FirebaseAPIKeyManager
+from auth import get_current_user
 import asyncio
 
 logging.basicConfig(level=logging.INFO)
@@ -41,16 +40,22 @@ load_dotenv()
 # uvicorn を server/ から起動すると壊れるため、実ファイルの存在を確認して修正する
 def _resolve_credentials_path() -> str:
     """GCP クレデンシャルファイルのパスを解決する"""
+    from config import FIREBASE_CREDENTIALS_PATH
+    # 1. GOOGLE_APPLICATION_CREDENTIALS 環境変数
     env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     if env_path and os.path.isfile(env_path):
         return env_path
-    # server/ ディレクトリ (= このスクリプトと同階層) 内を探す
-    server_dir = os.path.dirname(os.path.abspath(__file__))
-    fallback = os.path.join(server_dir, "aimeebo-firebase-adminsdk-fbsvc-66b668e015.json")
-    if os.path.isfile(fallback):
-        return fallback
-    # env_path がある場合はそのまま返す (エラーメッセージで原因がわかるように)
-    return env_path or fallback
+    # 2. config.py の FIREBASE_CREDENTIALS_PATH
+    if FIREBASE_CREDENTIALS_PATH and os.path.isfile(FIREBASE_CREDENTIALS_PATH):
+        return FIREBASE_CREDENTIALS_PATH
+    # 3. server/ ディレクトリ基準で FIREBASE_CREDENTIALS_PATH を試す
+    if FIREBASE_CREDENTIALS_PATH:
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        resolved = os.path.join(server_dir, os.path.basename(FIREBASE_CREDENTIALS_PATH))
+        if os.path.isfile(resolved):
+            return resolved
+    logger.warning("Firebase credentials not found. Set GOOGLE_APPLICATION_CREDENTIALS env var.")
+    return env_path or ""
 
 try:
     database_url = os.getenv('FIREBASE_DATABASE_URL')
@@ -74,9 +79,12 @@ except Exception as e:
     logger.error(f"Error initializing Firebase Admin SDK: {e}")
 
 app = FastAPI()
+ALLOWED_ORIGINS = os.environ.get(
+    "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+    allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 agenda_agent = AgendaManagementAgent(config_path=os.path.join(
     AGENT_CONFIG_DIR, "agenda_agent_config.json"))
@@ -204,9 +212,8 @@ class AddMessageRequest(BaseModel):
 # ================================================================
 
 @app.get("/api/config", summary="Get client configuration (API keys)")
-async def get_client_config():
-    """フロントエンドに Gemini API キーを提供する。
-    NOTE: 本番環境では認証を追加すること。"""
+async def get_client_config(user: dict = Depends(get_current_user)):
+    """フロントエンドに Gemini API キーを提供する（認証必須）。"""
     return {"geminiApiKey": DEFAULT_GEMINI_API_KEY}
 
 
@@ -220,7 +227,7 @@ class DeepAnalysisRequest(BaseModel):
     transcript_snippet: Optional[str] = ""
 
 @app.post("/api/deep-analysis", summary="Route and analyze complex questions")
-async def deep_analysis_endpoint(request: DeepAnalysisRequest):
+async def deep_analysis_endpoint(request: DeepAnalysisRequest, user: dict = Depends(get_current_user)):
     """Router LLM で判定し、必要なら Deep Analysis LLM で分析を実行する"""
     try:
         result = await route_and_analyze(
@@ -243,7 +250,7 @@ class BrainRequest(BaseModel):
     meeting_context: Optional[Dict[str, Any]] = {}
 
 @app.post("/api/brain", summary="Process delegate_to_brain requests via Smart LLM")
-async def brain_endpoint(req: BrainRequest):
+async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_user)):
     """Brain LLM でツール選択・実行・応答生成を行う"""
     try:
         result = await process_brain_request(
@@ -707,7 +714,7 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 # ================================================================
 
 @app.post("/invoke", response_model=JsonRpcResponse, summary="Invoke Noa Agent")
-async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTasks):
+async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     if request.method != "ExecuteTask":
         return JsonRpcResponse(error={"code": -32601, "message": "Method not found"}, id=request.id)
 
@@ -720,6 +727,17 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
     room_id = task_payload.roomId
     if not room_id:
         return JsonRpcResponse(error={"code": -32602, "message": "Invalid params: 'roomId' missing"}, id=request.id)
+
+    # 認証ユーザーの認可チェック（参加者のみ許可）
+    # NOTE: speakerId は diarization ID (speaker_1 等) であり Firebase uid ではないためチェックしない
+    uid = user["uid"]
+    room_ref_check = db.reference(f"rooms/{room_id}")
+    room_data_check = room_ref_check.get()
+    if not room_data_check or not room_data_check.get("participants", {}).get(uid):
+        return JsonRpcResponse(
+            error={"code": -32600, "message": "Not a participant of this room"},
+            id=request.id
+        )
 
     try:
         room_ref = db.reference(f"rooms/{room_id}")
@@ -981,9 +999,16 @@ async def stt_endpoint(
     enable_diarization: bool = Form(False),
     min_speakers: int = Form(2),
     max_speakers: int = Form(6),
+    user: dict = Depends(get_current_user),
 ):
     """音声ファイルを受信し、設定されたSTTプロバイダーでテキストに変換。
     enable_diarization=true の場合、Google Cloud STT v2 で話者分離を行う。"""
+    # 参加者チェック
+    uid = user["uid"]
+    stt_room_data = db.reference(f"rooms/{room_id}").get()
+    if not stt_room_data or not stt_room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
     from stt_provider import STTProvider
 
     audio_data = await audio.read()
@@ -1036,8 +1061,14 @@ async def stt_endpoint(
 
 
 @app.post("/tts", summary="Text-to-speech synthesis")
-async def tts_endpoint(request_data: TTSRequest):
+async def tts_endpoint(request_data: TTSRequest, user: dict = Depends(get_current_user)):
     """テキストを受信し、設定されたTTSプロバイダーで音声に変換"""
+    # 参加者チェック
+    uid = user["uid"]
+    tts_room_data = db.reference(f"rooms/{request_data.room_id}").get()
+    if not tts_room_data or not tts_room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
     from tts_provider import TTSProvider
 
     room_config = api_key_manager.get_room_config(request_data.room_id)
@@ -1144,6 +1175,23 @@ async def websocket_stt(websocket: WebSocket, room_id: str):
     """
     from streaming_stt import StreamingSTTSession
     import base64
+
+    # accept() 前にクエリパラメータで認証
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+    try:
+        decoded = firebase_auth.verify_id_token(token)
+        ws_uid = decoded["uid"]
+    except Exception:
+        await websocket.close(code=1008, reason="Invalid token")
+        return
+    # 参加者チェック
+    ws_room_data = db.reference(f"rooms/{room_id}").get()
+    if not ws_room_data or not ws_room_data.get("participants", {}).get(ws_uid):
+        await websocket.close(code=1008, reason="Not a room participant")
+        return
 
     await websocket.accept()
     session: StreamingSTTSession | None = None

@@ -89,11 +89,15 @@ export class AudioRecorder extends EventEmitter {
           workletName,
         );
 
-        this.recordingWorklet.port.onmessage = async (ev: MessageEvent) => {
-          const arrayBuffer = ev.data.data.int16arrayBuffer;
-          if (arrayBuffer) {
-            const arrayBufferString = arrayBufferToBase64(arrayBuffer);
-            this.emit("data", arrayBufferString);
+        this.recordingWorklet.port.onmessage = (ev: MessageEvent) => {
+          const event = ev.data.event;
+          if (event === "chunk") {
+            const arrayBuffer = ev.data.data?.int16arrayBuffer;
+            if (arrayBuffer) {
+              this.emit("data", arrayBufferToBase64(arrayBuffer));
+            }
+          } else if (event === "vad") {
+            this.emit("vad", ev.data.speaking);
           }
         };
         this.source.connect(this.recordingWorklet);
@@ -118,6 +122,16 @@ export class AudioRecorder extends EventEmitter {
       }
     })();
     return this.starting;
+  }
+
+  /** VAD を有効/無効にする */
+  setVadEnabled(enabled: boolean) {
+    this.recordingWorklet?.port.postMessage({ vadEnabled: enabled });
+  }
+
+  /** VAD 閾値を動的に変更する */
+  setVadThresholds(high: number, low: number) {
+    this.recordingWorklet?.port.postMessage({ thresholdHigh: high, thresholdLow: low });
   }
 
   stop() {
