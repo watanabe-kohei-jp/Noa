@@ -17,7 +17,6 @@ export default function SessionSelector({
   currentSessionId,
   onCreateSession,
   onSwitchSession,
-  onEndSession,
 }: SessionSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
 

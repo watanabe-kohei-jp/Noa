@@ -4,7 +4,6 @@ OpenAI TTS / Google Cloud Text-to-Speech に対応
 """
 
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

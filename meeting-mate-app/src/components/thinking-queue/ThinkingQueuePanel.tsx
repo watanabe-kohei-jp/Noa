@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Loader2, Check, X, Brain, Search } from "lucide-react";
 import { useThinkingQueue, type ThinkingTask } from "../../contexts/ThinkingQueueContext";
 

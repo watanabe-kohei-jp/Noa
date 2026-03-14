@@ -331,12 +331,15 @@ function LivePanelInner({
       {/* Connect / Disconnect */}
       <button
         onClick={connected ? disconnect : connect}
+        disabled={!connected && !sharedStream}
         className={`p-2 rounded-xl transition-all ${
           connected
             ? "bg-red-500 hover:bg-red-600 text-white"
-            : "bg-green-500 hover:bg-green-600 text-white"
+            : !sharedStream
+              ? "bg-gray-300 text-gray-500 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500"
+              : "bg-green-500 hover:bg-green-600 text-white"
         }`}
-        title={connected ? "Live AI 切断" : "Live AI 接続"}
+        title={connected ? "Live AI 切断" : !sharedStream ? "先にマイクをONにしてください" : "Live AI 接続"}
       >
         {connected ? <PhoneOff size={16} /> : <Phone size={16} />}
       </button>

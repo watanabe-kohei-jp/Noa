@@ -27,15 +27,51 @@ export function ThinkingQueueProvider({ children }: { children: React.ReactNode 
   const [tasks, setTasks] = useState<ThinkingTask[]>([]);
 
   const addTask = useCallback((task: Omit<ThinkingTask, "startedAt" | "status"> & { status?: ThinkingTask["status"] }) => {
-    setTasks((prev) => [
-      ...prev,
-      { ...task, status: task.status || "running", startedAt: Date.now() },
-    ]);
+    setTasks((prev) => {
+      const nextStatus = task.status || "running";
+      const now = Date.now();
+      const nextTask: ThinkingTask = {
+        ...task,
+        status: nextStatus,
+        startedAt: now,
+        completedAt: nextStatus === "running" ? undefined : now,
+      };
+
+      const existingIndex = prev.findIndex((t) => t.id === task.id);
+      if (existingIndex === -1) {
+        return [...prev, nextTask];
+      }
+
+      return prev.map((t, index) =>
+        index === existingIndex
+          ? {
+              ...t,
+              ...nextTask,
+              startedAt: t.startedAt,
+              // running に戻す場合は completedAt をクリア
+              completedAt: nextStatus === "running" ? undefined : (nextTask.completedAt ?? t.completedAt),
+            }
+          : t
+      );
+    });
   }, []);
 
   const updateTask = useCallback((id: string, update: Partial<ThinkingTask>) => {
     setTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, ...update } : t))
+      prev.map((t) => {
+        if (t.id !== id) return t;
+
+        const nextStatus = update.status ?? t.status;
+        const isTerminal = nextStatus === "completed" || nextStatus === "error";
+
+        return {
+          ...t,
+          ...update,
+          completedAt:
+            update.completedAt ??
+            (isTerminal ? t.completedAt ?? Date.now() : undefined),
+        };
+      })
     );
   }, []);
 

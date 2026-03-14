@@ -128,7 +128,7 @@ JSON配列のみ出力してください。
                 fallback_note = {"id": new_note_id, "type": "memo",
                                  "text": f"LLM Response (unparsed): {llm_response_text}"}
                 current_notes_dict[new_note_id] = fallback_note
-                return {"notes": current_notes_dict}, f"LLM response was not valid JSON, created a fallback memo."
+                return {"notes": current_notes_dict}, "LLM response was not valid JSON, created a fallback memo."
             return {"notes": current_notes_dict}, f"LLM response was not valid JSON: {e}"
 
         return {"notes": updated_notes_dict}, f"Notes updated by LLM. Total: {len(updated_notes_dict)}."

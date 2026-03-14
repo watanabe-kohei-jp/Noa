@@ -4,8 +4,7 @@ from __future__ import annotations
 # マルチプロバイダー LLM 設定
 from config import (
     DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT,
-    AGENT_CONFIG_DIR, MAX_ITERATIONS, MAX_RETRY_ATTEMPTS,
-    DEFAULT_GEMINI_API_KEY, get_default_api_key, logger as config_logger
+    AGENT_CONFIG_DIR, DEFAULT_GEMINI_API_KEY, get_default_api_key
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
@@ -15,15 +14,14 @@ from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
-from file_utils import load_json, save_json, ensure_dir_exists
 from firebase_admin import credentials, auth as firebase_auth, db
 import firebase_admin
 import os
 import json
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import logging

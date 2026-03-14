@@ -19,7 +19,6 @@ WebSocket プロトコル:
 """
 
 import asyncio
-import base64
 import logging
 import queue
 import threading
@@ -187,11 +186,6 @@ class StreamingSTTSession:
                 word_info.start_time.total_seconds()
                 if word_info.start_time else 0.0
             )
-            word_end = (
-                word_info.end_time.total_seconds()
-                if word_info.end_time else 0.0
-            )
-
             if tag != current_speaker:
                 if current_speaker is not None and current_words:
                     segments.append({
