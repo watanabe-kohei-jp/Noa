@@ -55,6 +55,7 @@ function LivePanelInner({
 
   // Audio recording (merged from LiveControlTray)
   const [inVolume, setInVolume] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [tabAudioActive, setTabAudioActive] = useState(false);
   const [audioRecorder] = useState(() => new AudioRecorder());
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -203,8 +204,12 @@ function LivePanelInner({
       audioRecorder
         .on("data", onData)
         .on("volume", setInVolume)
+        .on("vad", (speaking: boolean) => setIsSpeaking(speaking))
         .start(sharedStream)
-        .then(() => console.log("[LivePanel] audioRecorder started OK"))
+        .then(() => {
+          audioRecorder.setVadEnabled(true);
+          console.log("[LivePanel] audioRecorder started OK (VAD enabled)");
+        })
         .catch((err: unknown) =>
           console.warn("[LivePanel] audioRecorder start failed:", err)
         );
@@ -213,7 +218,8 @@ function LivePanelInner({
     }
 
     return () => {
-      audioRecorder.off("data", onData).off("volume", setInVolume);
+      audioRecorder.off("data", onData).off("volume", setInVolume).off("vad");
+      setIsSpeaking(false);
     };
   }, [connected, client, sharedStream, audioRecorder]);
 
@@ -380,9 +386,15 @@ function LivePanelInner({
         </span>
       )}
 
-      {/* Volume indicators (compact) */}
+      {/* Volume indicators (compact) + VAD indicator */}
       {connected && (
         <div className="flex items-center gap-1 flex-shrink-0">
+          <span
+            className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${
+              isSpeaking ? "bg-green-500" : "bg-gray-400"
+            }`}
+            title={isSpeaking ? "発話検出中" : "無音"}
+          />
           <div className="w-8 h-1.5 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
             <div
               className="h-full bg-green-500 transition-all duration-75"
