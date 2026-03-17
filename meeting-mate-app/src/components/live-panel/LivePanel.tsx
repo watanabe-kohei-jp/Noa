@@ -85,7 +85,19 @@ function LivePanelInner({
         status: "todo",
       });
     },
-    onDiagram: () => {},
+    onDiagram: (mermaidCode: string, title: string) => {
+      if (!roomId || !mermaidCode) return;
+      const db = getDatabase();
+      if (!db) return;
+      const path = currentSessionId
+        ? `rooms/${roomId}/sessions/${currentSessionId}/overviewDiagram`
+        : `rooms/${roomId}/overviewDiagram`;
+      const diagramRef = ref(db, path);
+      set(diagramRef, {
+        title: title || "会議の概要図",
+        mermaidDefinition: mermaidCode,
+      });
+    },
   }), [roomId, currentSessionId]);
   const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
   // NOTE: useBrain は client.send() を使わなくなった（1008 対策）。

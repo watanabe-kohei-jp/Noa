@@ -2,6 +2,7 @@ import json
 from typing import List, Tuple, Dict, Any
 
 from llm_provider import llm_complete
+from mermaid_utils import validate_and_clean_mermaid
 from config import logger
 
 
@@ -176,58 +177,11 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
         if not llm_response_text:
             return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM returned empty overview diagram update."
 
-        # Clean the response - remove any markdown code blocks if present
-        cleaned_response_text = llm_response_text.strip()
-        if cleaned_response_text.startswith("```mermaid"):
-            cleaned_response_text = cleaned_response_text[10:-3].strip()
-        elif cleaned_response_text.startswith("```"):
-            cleaned_response_text = cleaned_response_text[3:-3].strip()
-        elif cleaned_response_text.startswith("`") and cleaned_response_text.endswith("`"):
-            cleaned_response_text = cleaned_response_text[1:-1].strip()
-
-        # Validate that the response looks like Mermaid syntax
-        if not (cleaned_response_text.startswith("graph TD") or cleaned_response_text.startswith("graph LR")):
-            logger.warning(
-                f"LLM response doesn't start with 'graph TD' or 'graph LR': {cleaned_response_text[:50]}...")
-            try:
-                diagram_update = json.loads(cleaned_response_text)
-                if isinstance(diagram_update, dict) and "mermaid_definition" in diagram_update:
-                    cleaned_response_text = diagram_update["mermaid_definition"]
-                    logger.info(
-                        "Successfully extracted mermaid_definition from JSON fallback")
-                else:
-                    logger.error(
-                        "Invalid response format, using existing definition")
-                    return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM response was not in the expected Mermaid format."
-            except json.JSONDecodeError:
-                logger.error(
-                    "Response is neither valid Mermaid nor JSON, using existing definition")
-                return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM response was not in the expected Mermaid format."
-
-        new_mermaid_definition = cleaned_response_text
-
-        # Post-process to clean and fix common Mermaid syntax issues
-        if isinstance(new_mermaid_definition, str):
-            lines = new_mermaid_definition.splitlines()
-            corrected_lines = []
-            for line in lines:
-                stripped_line = line.lstrip()
-                if stripped_line.startswith("%") and not stripped_line.startswith("%%"):
-                    corrected_lines.append(line.replace(
-                        stripped_line, "%%" + stripped_line[1:], 1))
-                elif stripped_line.startswith("%%"):
-                    comment_text = stripped_line[2:].strip()
-                    comment_text = comment_text.encode(
-                        'ascii', 'ignore').decode('ascii')
-                    if comment_text:
-                        corrected_lines.append(line.split(
-                            "%%")[0] + "%% " + comment_text)
-                    else:
-                        corrected_lines.append(
-                            line.split("%%")[0] + "%% Comment")
-                else:
-                    corrected_lines.append(line)
-            new_mermaid_definition = "\n".join(corrected_lines)
+        # 共通バリデーション + サニタイズ
+        new_mermaid_definition = validate_and_clean_mermaid(llm_response_text)
+        if not new_mermaid_definition:
+            logger.error("LLM response failed Mermaid validation, using existing definition")
+            return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM response was not in the expected Mermaid format."
 
         new_title = existing_title
         if instruction and len(instruction.strip()) > 0:

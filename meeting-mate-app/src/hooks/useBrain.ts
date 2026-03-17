@@ -216,7 +216,7 @@ export function useBrain(
             if (action.action === "generate_diagram" && action.data) {
               callbacksRef.current?.onDiagram?.(
                 (action.data.mermaid_code as string) || "",
-                (action.data.description as string) || ""
+                (action.data.title as string) || ""
               );
             }
           }
