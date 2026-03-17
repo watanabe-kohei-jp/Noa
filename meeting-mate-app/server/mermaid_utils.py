@@ -67,9 +67,12 @@ def validate_and_clean_mermaid(raw_text: str) -> str | None:
     for line in safe_lines:
         stripped_line = line.lstrip()
         if stripped_line.startswith("%") and not stripped_line.startswith("%%"):
-            corrected_lines.append(
-                line.replace(stripped_line, "%%" + stripped_line[1:], 1)
-            )
+            comment_text = stripped_line[1:].strip()
+            comment_text = comment_text.encode("ascii", "ignore").decode("ascii")
+            if comment_text:
+                corrected_lines.append(line.split("%")[0] + "%% " + comment_text)
+            else:
+                corrected_lines.append(line.split("%")[0] + "%% Comment")
         elif stripped_line.startswith("%%"):
             comment_text = stripped_line[2:].strip()
             comment_text = comment_text.encode("ascii", "ignore").decode("ascii")
