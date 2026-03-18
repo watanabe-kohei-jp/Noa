@@ -24,6 +24,8 @@ export type TranscriptEntry = {
   endTime?: number;
   /** データソース */
   source?: "stt" | "live-api" | "manual";
+  /** メッセージの出自（Agent トリガー判定に使用） */
+  origin?: "human_chat" | "human_stt" | "live_ai" | "agent_summary" | "system";
 };
 
 /** speakerMap エントリ: 話者タグ → 名前 + 色 */

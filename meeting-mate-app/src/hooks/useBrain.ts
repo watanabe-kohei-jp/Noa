@@ -1,8 +1,9 @@
 import { useState, useCallback, useRef } from "react";
 import type { GenAILiveClient } from "../lib/genai-live-client";
-import type { SessionData, TranscriptEntry } from "../types/data";
+import type { SessionData } from "../types/data";
 import type { BrainResult } from "../lib/live-tools/tool-handler";
 import { authFetch } from "../lib/api-client";
+import { buildBrainContext } from "../lib/meeting-context";
 
 interface BrainAction {
   action: string;
@@ -33,62 +34,7 @@ export interface ThinkingQueueCallbacks {
   ) => void;
 }
 
-/** Firebase の transcript はオブジェクト ({pushKey: entry}) か配列の可能性がある */
-function toTranscriptArray(raw: unknown): TranscriptEntry[] {
-  if (Array.isArray(raw)) return raw;
-  if (raw && typeof raw === "object") {
-    return Object.values(raw as Record<string, TranscriptEntry>);
-  }
-  return [];
-}
-
-/** Firebase の tasks はオブジェクトか配列の可能性がある */
-function toArray<T>(raw: unknown): T[] {
-  if (Array.isArray(raw)) return raw;
-  if (raw && typeof raw === "object") {
-    return Object.values(raw as Record<string, T>);
-  }
-  return [];
-}
-
-function buildMeetingContext(
-  roomData: SessionData | null,
-  roomId?: string | null,
-): Record<string, unknown> {
-  if (!roomData) return {};
-  const transcriptArr = toTranscriptArray(roomData.transcript);
-  const tasksArr = toArray<SessionData["tasks"][number]>(roomData.tasks);
-  const notesArr = toArray<SessionData["notes"][number]>(roomData.notes);
-  return {
-    room_id: roomId || "",
-    title: roomData.sessionTitle || roomData.projectTitle || "",
-    participants: Object.entries(roomData.participants || {}).map(
-      ([id, p]) => ({ id, name: p.name, role: p.role })
-    ),
-    recent_transcript: transcriptArr.slice(-20).map((t) => ({
-      speaker: t.userName || t.speakerLabel || t.userId,
-      text: t.text,
-      timestamp: t.timestamp,
-    })),
-    tasks: tasksArr.map((t) => ({
-      title: t.title,
-      assignee: t.assignee,
-      status: t.status,
-      priority: t.priority,
-    })),
-    agenda: roomData.currentAgenda
-      ? {
-          mainTopic: roomData.currentAgenda.mainTopic,
-          details:
-            roomData.currentAgenda.details?.map((d) => d.text) || [],
-        }
-      : null,
-    notes: notesArr.map((n) => ({
-      type: n.type,
-      text: n.text,
-    })),
-  };
-}
+// 正規化関数と buildBrainContext は meeting-context.ts に移動済み
 
 export function useBrain(
   client: GenAILiveClient,
@@ -121,7 +67,7 @@ export function useBrain(
       });
 
       try {
-        const meetingContext = buildMeetingContext(roomData, roomId);
+        const meetingContext = buildBrainContext(roomData, roomId);
         console.log("[useBrain] calling /api/brain...");
 
         // 60秒タイムアウト付き authFetch

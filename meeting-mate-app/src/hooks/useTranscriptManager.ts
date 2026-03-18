@@ -90,6 +90,7 @@ export function useTranscriptManager(
             startTime: seg.startTime,
             endTime: seg.endTime,
             source: "stt",
+            origin: "human_stt",
           });
         }
       } else {
@@ -107,6 +108,7 @@ export function useTranscriptManager(
           startTime: result.startTime,
           endTime: result.endTime,
           source: "stt",
+          origin: "human_stt",
         });
       }
     },
@@ -126,6 +128,7 @@ export function useTranscriptManager(
         speakerId,
         speakerLabel: role === "ai" ? "Noa" : "Live User",
         source: "live-api",
+        origin: role === "ai" ? "live_ai" : "human_stt",
       });
     },
     [pushEntry]
@@ -143,6 +146,7 @@ export function useTranscriptManager(
         speakerId,
         speakerLabel: resolveLabel(speakerId, speakerMapRef.current),
         source: "manual",
+        origin: "human_chat",
       });
     },
     [pushEntry]

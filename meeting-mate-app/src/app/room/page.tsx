@@ -28,6 +28,7 @@ import { participantColors, getParticipantColorIndex } from '@/app/room/componen
 import {
   TranscriptEntry, PanelId
 } from '@/types/data';
+import type { LivePanelAPI } from '@/types/live-api';
 
 // Live API パネル
 import LivePanel from '@/components/live-panel/LivePanel';
@@ -196,6 +197,10 @@ export default function RoomPage() {
   const { callBackendApi } = useBackendApi();
   const { triggerFlash } = useFlashMessages();
 
+  // Live AI テキスト送信 API
+  const livePanelApiRef = useRef<LivePanelAPI | null>(null);
+  const lastAgentNotifyRef = useRef<number>(0);
+
   // Streaming STT (話者分離リアルタイム)
   const { stream: sharedStream, startMic, stopMic } = useSharedAudioStream();
 
@@ -204,6 +209,23 @@ export default function RoomPage() {
     sessionId: currentSessionId,
     speakerMap,
   });
+
+  // Agent 結果を Live AI に通知（デバウンス付き）
+  const notifyLiveAI = useCallback((result: Record<string, unknown>) => {
+    const now = Date.now();
+    if (now - lastAgentNotifyRef.current < 10000) return; // 10秒デバウンス
+    const agents = result.invokedAgents as string[] | undefined;
+    if (!agents?.length) return;
+    const parts: string[] = [];
+    if (result.updatedTasks) parts.push("タスク更新");
+    if (result.updatedMinutes) parts.push("メモ更新");
+    if (result.updatedAgenda) parts.push("議題更新");
+    if (result.updatedOverviewDiagram) parts.push("概要図更新");
+    if (parts.length === 0) parts.push(agents.join(", "));
+    const summary = parts.join("、");
+    livePanelApiRef.current?.sendText(`【会議情報更新】${summary}`);
+    lastAgentNotifyRef.current = now;
+  }, []);
 
   // Streaming STT の final 結果を処理: Firebase書き込み + AI分析トリガー
   const handleStreamingSTTFinal = useCallback(async (result: import('@/hooks/useStreamingSTT').STTResult) => {
@@ -243,6 +265,8 @@ export default function RoomPage() {
             if (apiResult.updatedAgenda.suggestedNextTopics) triggerFlash('suggestedNextTopic');
           }
           if (apiResult.updatedOverviewDiagram) triggerFlash('overviewDiagram');
+          // Agent 結果を Live AI に通知
+          notifyLiveAI(apiResult);
         }
       } catch (apiError: Error | unknown) {
         console.error("Error sending streaming STT transcript to backend:", apiError);
@@ -250,7 +274,7 @@ export default function RoomPage() {
         setTimeout(() => setProcessingAgents([]), 1000);
       }
     }
-  }, [addSTTResult, callBackendApi, currentRoomId, currentSessionId, pageCurrentUser, speakerMap, triggerFlash]);
+  }, [addSTTResult, callBackendApi, currentRoomId, currentSessionId, pageCurrentUser, speakerMap, triggerFlash, notifyLiveAI]);
 
   const {
     startSTT: startStreamingSTT,
@@ -758,12 +782,15 @@ export default function RoomPage() {
 
   const handleSendMessage = useCallback(async () => {
     if (message.trim() && pageCurrentUser && currentRoomId) {
+      // テキストを Live AI にも送信
+      livePanelApiRef.current?.sendText(`【チャット】${pageCurrentUser.name}: ${message}`);
+
       const newEntry: TranscriptEntry = {
         userId: pageCurrentUser.id,
         userName: pageCurrentUser.name,
         text: message,
-        timestamp: new Date().toISOString(), // ISO形式に変更
-        role: "user" // ユーザー発言なので'user'を設定
+        timestamp: new Date().toISOString(),
+        role: "user"
       };
       triggerFlash('transcript');
       setProcessingAgents([]);
@@ -780,6 +807,8 @@ export default function RoomPage() {
             if (result.updatedAgenda.suggestedNextTopics) triggerFlash('suggestedNextTopic');
           }
           if (result.updatedOverviewDiagram) triggerFlash('overviewDiagram');
+          // Agent 結果を Live AI に通知
+          notifyLiveAI(result);
         }
       } catch (apiError: Error | unknown) {
         console.error("Error sending manual transcript to backend:", apiError);
@@ -802,7 +831,7 @@ export default function RoomPage() {
       }
       setMessage('');
     }
-  }, [message, pageCurrentUser, currentRoomId, callBackendApi, triggerFlash]);
+  }, [message, pageCurrentUser, currentRoomId, currentSessionId, callBackendApi, triggerFlash, notifyLiveAI]);
 
   const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -978,6 +1007,7 @@ export default function RoomPage() {
                 roomData={roomData}
                 sharedStream={sharedStream}
                 currentSessionId={currentSessionId}
+                onReady={(api) => { livePanelApiRef.current = api; }}
               />
               <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-1" />
               {/* TTS再生/停止ボタン */}
