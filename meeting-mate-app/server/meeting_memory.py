@@ -260,16 +260,26 @@ class MeetingMemory:
                 # 距離しきい値フィルタ: 無関係な結果を除外
                 if distance is not None and distance > MAX_SEARCH_DISTANCE:
                     continue
+                meta = results["metadatas"][0][i] if results["metadatas"] and results["metadatas"][0] else {}
                 entry = {
                     "id": doc_id,
+                    "session_id": meta.get("session_id", ""),
                     "summary": results["documents"][0][i] if results["documents"] else "",
                     "distance": distance,
+                    "metadata": meta,
                 }
-                if results["metadatas"] and results["metadatas"][0]:
-                    entry["metadata"] = results["metadatas"][0][i]
                 formatted.append(entry)
 
         return formatted
+
+    async def delete_session(self, room_id: str, session_id: str) -> None:
+        """ChromaDB からセッションのドキュメントを削除"""
+        doc_id = f"{room_id}::{session_id}"
+        try:
+            self.collection.delete(ids=[doc_id])
+            logger.info(f"[MeetingMemory] Deleted from ChromaDB: {doc_id}")
+        except Exception as e:
+            logger.warning(f"[MeetingMemory] ChromaDB delete failed (may not exist): {e}")
 
     async def process_ended_session(self, room_id: str, session_id: str) -> dict:
         """セッション終了時の一連の処理: 要約生成 → 保存 → ベクトル化"""

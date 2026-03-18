@@ -106,6 +106,8 @@ export default function RoomPage() {
     createSession,
     switchSession,
     endSession,
+    renameSession,
+    deleteSession,
   } = useRoomData(roomId);
 
   // ヘルパー関数: userNameから表示名を生成
@@ -957,6 +959,9 @@ export default function RoomPage() {
                 onCreateSession={createSession}
                 onSwitchSession={switchSession}
                 onEndSession={endSession}
+                onRenameSession={renameSession}
+                onDeleteSession={deleteSession}
+                roomId={roomId}
               />
               {/* Streaming 接続状態 */}
               {isStreamingConnected && (

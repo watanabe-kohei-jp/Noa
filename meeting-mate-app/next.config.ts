@@ -58,6 +58,10 @@ const nextConfig: NextConfig = {
           source: '/api/sessions/:path*',
           destination: `${BACKEND_URL}/api/sessions/:path*`,
         },
+        {
+          source: '/api/memory/:path*',
+          destination: `${BACKEND_URL}/api/memory/:path*`,
+        },
       ];
     },
   }),

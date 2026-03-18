@@ -291,6 +291,55 @@ async def end_session_endpoint(req: EndSessionRequest, background_tasks: Backgro
     return {"status": "processing", "message": "要約生成をバックグラウンドで開始しました"}
 
 
+class MemorySearchRequest(BaseModel):
+    room_id: str
+    query: str
+    n_results: int = 5
+
+
+@app.post("/api/memory/search", summary="セッション横断検索 (RAG)")
+async def memory_search_endpoint(req: MemorySearchRequest):
+    """過去セッションの要約をベクトル検索"""
+    if len(req.query.strip()) < 2:
+        raise HTTPException(status_code=400, detail="Query must be at least 2 characters")
+    n_results = min(req.n_results, 5)
+
+    from meeting_memory import get_meeting_memory
+    memory = get_meeting_memory()
+    results = await memory.search(req.query, room_id=req.room_id, n_results=n_results)
+    return {"results": results}
+
+
+@app.delete("/api/sessions/{room_id}/{session_id}", summary="セッション削除 (Firebase + ChromaDB)")
+async def delete_session_endpoint(room_id: str, session_id: str):
+    """ended セッションを Firebase と ChromaDB から削除"""
+    session_ref = db.reference(f"rooms/{room_id}/sessions/{session_id}")
+    session_data = session_ref.get()
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 要約生成中なら削除拒否
+    summary_status = session_data.get("summary_status")
+    if summary_status == "processing":
+        raise HTTPException(status_code=409, detail="要約生成中のため削除できません。完了後に再試行してください。")
+
+    # ChromaDB から削除
+    from meeting_memory import get_meeting_memory
+    memory = get_meeting_memory()
+    await memory.delete_session(room_id, session_id)
+
+    # Firebase から削除
+    session_ref.delete()
+
+    # currentSessionId がこのセッションなら null にリセット
+    current_ref = db.reference(f"rooms/{room_id}/currentSessionId")
+    current_id = current_ref.get()
+    if current_id == session_id:
+        current_ref.set(None)
+
+    return {"status": "deleted", "message": "セッションを削除しました"}
+
+
 # ================================================================
 # Endpoints: join_room, add_message
 # ================================================================
