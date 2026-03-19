@@ -28,6 +28,8 @@ import { Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
 import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
 import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
+import { useProactiveMonitor } from "../../hooks/useProactiveMonitor";
+import ProactiveSuggestionBanner from "./ProactiveSuggestionBanner";
 
 // Firebase
 import { ref, push, set } from "firebase/database";
@@ -105,6 +107,15 @@ function LivePanelInner({
     },
   }), [roomId, currentSessionId]);
   const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
+
+  // Proactive monitor (Active mode only)
+  const { currentSuggestion, dismissSuggestion } = useProactiveMonitor({
+    enabled: mode === "active" && connected,
+    roomData,
+    roomId,
+    currentSessionId: currentSessionId ?? null,
+    thinkingQueue,
+  });
   // sendText: page.tsx から Live AI にテキストを送信する
   const sendText = useCallback((text: string) => {
     if (!connected) {
@@ -531,6 +542,12 @@ function LivePanelInner({
 
       {/* ThinkingQueue overlay */}
       <ThinkingQueuePanel />
+
+      {/* Proactive suggestion banner */}
+      <ProactiveSuggestionBanner
+        suggestion={currentSuggestion}
+        onDismiss={dismissSuggestion}
+      />
 
       {/* Hidden elements for tab capture */}
       <video ref={videoRef} className="hidden" playsInline />

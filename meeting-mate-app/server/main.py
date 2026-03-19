@@ -8,7 +8,7 @@ from config import (
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
-from brain import process_brain_request
+from brain import process_brain_request, process_proactive_check
 from vision_analyzer import analyze_vision
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import logging
+import time
 from datetime import datetime, timedelta
 from api_key_manager import FirebaseAPIKeyManager
 from auth import get_current_user
@@ -262,6 +263,54 @@ async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_use
         return result
     except Exception as e:
         logger.error(f"Brain processing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
+# Endpoints: Proactive Check (Active mode intervention)
+# ================================================================
+
+class ProactiveCheckRequest(BaseModel):
+    room_id: str
+    session_id: Optional[str] = None
+    recent_transcript: List[Dict[str, Any]]
+    meeting_context: Optional[Dict[str, Any]] = {}
+    already_suggested_keys: List[str] = []
+
+
+# Room 単位の簡易 rate limit（30秒ガード）
+_proactive_last_check: Dict[str, float] = {}
+_PROACTIVE_MIN_INTERVAL_S = 30.0
+
+
+@app.post("/api/proactive-check", summary="Proactive intervention check")
+async def proactive_check_endpoint(req: ProactiveCheckRequest, user: dict = Depends(get_current_user)):
+    """Active モードで Noa が介入すべきか判定する"""
+    uid = user["uid"]
+
+    # Room membership チェック
+    room_data = db.reference(f"rooms/{req.room_id}").get()
+    if not room_data or not room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
+    # Room 単位の rate limit（30秒以内の再リクエストは即返却）
+    now = time.time()
+    last = _proactive_last_check.get(req.room_id, 0.0)
+    if now - last < _PROACTIVE_MIN_INTERVAL_S:
+        return {"intervene": False, "reason": "rate limited"}
+    _proactive_last_check[req.room_id] = now
+
+    try:
+        # Payload 上限: transcript は最大20件
+        transcript = req.recent_transcript[-20:] if req.recent_transcript else []
+        result = await process_proactive_check(
+            recent_transcript=transcript,
+            meeting_context=req.meeting_context or {},
+            already_suggested_keys=req.already_suggested_keys,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Proactive check failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
