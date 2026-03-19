@@ -268,7 +268,22 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       // transcript
       let newTranscript: TranscriptEntry[] = [];
       const rawTranscript = data.transcript;
-      if (rawTranscript && typeof rawTranscript === 'object') {
+      if (Array.isArray(rawTranscript)) {
+        newTranscript = rawTranscript.map((t: TranscriptEntry, idx: number) => ({
+          id: String(idx),
+          userId: t.userId || 'unknown',
+          userName: t.userName || '不明なユーザー',
+          text: t.text || '',
+          timestamp: t.timestamp || new Date().toISOString(),
+          role: t.role,
+          speakerId: t.speakerId,
+          speakerLabel: t.speakerLabel,
+          speakerTag: t.speakerTag,
+          startTime: t.startTime,
+          endTime: t.endTime,
+          source: t.source,
+        }));
+      } else if (rawTranscript && typeof rawTranscript === 'object') {
         newTranscript = Object.entries(rawTranscript as Record<string, TranscriptEntry>).map(([pushId, t]) => ({
           id: pushId,
           userId: t.userId || 'unknown',
