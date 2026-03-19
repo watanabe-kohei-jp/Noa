@@ -4,6 +4,11 @@ import {
 } from "@google/genai";
 import type { SessionData } from "../../types/data";
 import { GenAILiveClient } from "../genai-live-client";
+import {
+  buildLiveMeetingState,
+  type SessionMeetingState,
+  type MeetingStateCategory,
+} from "../meeting-context";
 
 export interface BrainResult {
   response_text?: string;
@@ -33,6 +38,7 @@ export interface ToolResultCallbacks {
 
 export interface MeetingContextProvider {
   getRoomData: () => SessionData | null;
+  getSessionState: () => SessionMeetingState | null;
 }
 
 export class LiveToolHandler {
@@ -88,6 +94,26 @@ export class LiveToolHandler {
           args.request,
           client
         );
+        continue;
+      }
+
+      if (fc.name === "get_meeting_state") {
+        const sessionState = this.contextProvider?.getSessionState() ?? null;
+        const result = buildLiveMeetingState(
+          sessionState,
+          (args.category || "all") as MeetingStateCategory
+        );
+        client.sendToolResponse({
+          functionResponses: [
+            {
+              id: fc.id!,
+              name: fc.name!,
+              willContinue: false,
+              response: result,
+              scheduling: FunctionResponseScheduling.INTERRUPT,
+            },
+          ],
+        });
         continue;
       }
 

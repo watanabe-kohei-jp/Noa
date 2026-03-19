@@ -16,8 +16,8 @@ import { AudioRecorder } from "../../lib/audio-recorder";
 import { LiveToolHandler, MeetingContextProvider } from "../../lib/live-tools/tool-handler";
 import { liveToolDeclarations } from "../../lib/live-tools/tool-declarations";
 import { getSystemPrompt } from "../../lib/live-tools/system-prompts";
-import type { LiveMode } from "../../types/live-api";
-import type { SessionData } from "../../types/data";
+import type { LiveMode, LivePanelAPI } from "../../types/live-api";
+import type { SessionData, TranscriptEntry, TodoItem, Notes } from "../../types/data";
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
 import { authFetch } from "../../lib/api-client";
@@ -39,6 +39,7 @@ interface LivePanelInnerProps {
   roomData: SessionData | null;
   sharedStream?: MediaStream | null;
   currentSessionId?: string | null;
+  onReady?: (api: LivePanelAPI) => void;
 }
 
 function LivePanelInner({
@@ -46,6 +47,7 @@ function LivePanelInner({
   roomData,
   sharedStream,
   currentSessionId,
+  onReady,
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connect, disconnect, volume } =
     useLiveAPIContext();
@@ -100,16 +102,59 @@ function LivePanelInner({
     },
   }), [roomId, currentSessionId]);
   const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
-  // NOTE: useBrain は client.send() を使わなくなった（1008 対策）。
-  // Brain 結果は sendToolResponse 経由で Gemini に渡る。
+  // sendText: page.tsx から Live AI にテキストを送信する
+  const sendText = useCallback((text: string) => {
+    if (!connected) {
+      console.log("[LivePanel] sendText: not connected, ignoring");
+      return;
+    }
+    client.send({ text }, true);
+    console.log("[LivePanel] sendText:", text.slice(0, 50));
+  }, [client, connected]);
+
+  // onReady で sendText API を公開
+  useEffect(() => {
+    onReady?.({ sendText });
+  }, [onReady, sendText]);
 
   // Accumulate current model turn text (no UI state needed)
   const currentModelTextRef = useRef<string>("");
 
-  // Configure tool handler with room context
+  // Configure tool handler with room context + session state
   useEffect(() => {
     const contextProvider: MeetingContextProvider = {
       getRoomData: () => roomData,
+      getSessionState: () => {
+        // roomData から session-scoped なデータを返す
+        // (useRoomData の onValue リスナーで最新状態が反映済み)
+        if (!roomData) return null;
+        const transcript = Array.isArray(roomData.transcript)
+          ? roomData.transcript
+          : roomData.transcript
+            ? Object.values(roomData.transcript as Record<string, TranscriptEntry>)
+            : [];
+        const tasks = Array.isArray(roomData.tasks)
+          ? roomData.tasks
+          : roomData.tasks
+            ? Object.values(roomData.tasks as Record<string, TodoItem>)
+            : [];
+        const notes = Array.isArray(roomData.notes)
+          ? roomData.notes
+          : roomData.notes
+            ? Object.values(roomData.notes as Record<string, Notes[number]>)
+            : [];
+        const participants = roomData.participants
+          ? Object.entries(roomData.participants).map(([id, p]) => ({ id, ...p }))
+          : [];
+        return {
+          transcript,
+          tasks,
+          notes,
+          currentAgenda: roomData.currentAgenda || null,
+          suggestedNextTopics: roomData.suggestedNextTopics || [],
+          participants,
+        };
+      },
     };
     toolHandlerRef.current.setContextProvider(contextProvider);
     toolHandlerRef.current.setCallbacks({
@@ -117,7 +162,7 @@ function LivePanelInner({
     });
   }, [roomData, requestBrain]);
 
-  // Sync transcript to Firebase
+  // Sync transcript to Firebase (with origin)
   const syncTranscriptToFirebase = useCallback(
     (text: string, role: "user" | "ai") => {
       // AI発話の場合、内部思考テキスト (markdown) をフィルタ
@@ -138,6 +183,7 @@ function LivePanelInner({
         role,
         speakerId: role === "ai" ? "noa" : "live-user",
         source: "live-api",
+        origin: role === "ai" ? "live_ai" : "human_stt",
       });
     },
     [roomId, currentSessionId]
@@ -438,6 +484,7 @@ interface LivePanelProps {
   roomData: SessionData | null;
   sharedStream?: MediaStream | null;
   currentSessionId?: string | null;
+  onReady?: (api: LivePanelAPI) => void;
 }
 
 export default function LivePanel({
@@ -445,6 +492,7 @@ export default function LivePanel({
   roomData,
   sharedStream,
   currentSessionId,
+  onReady,
 }: LivePanelProps) {
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
@@ -490,6 +538,7 @@ export default function LivePanel({
           roomData={roomData}
           sharedStream={sharedStream}
           currentSessionId={currentSessionId}
+          onReady={onReady}
         />
       </ThinkingQueueProvider>
     </LiveAPIProvider>

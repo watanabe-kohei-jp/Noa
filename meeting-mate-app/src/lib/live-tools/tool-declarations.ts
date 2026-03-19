@@ -7,7 +7,7 @@ export const liveToolDeclarations: FunctionDeclaration[] = [
   {
     name: "delegate_to_brain",
     description:
-      "データ検索、計算、分析、タスク登録、図生成、会議情報の確認など、情報の取得や処理が必要な場合にFunction Callingで呼び出してください。あなた自身の知識だけでは正確に答えられない質問や、ツールを使った処理が必要な場面で使います。挨拶・雑談・一般的な会話には使わないでください。ツール名を声に出さないでください。",
+      "データ検索、計算、分析、タスク登録、図生成など、外部データの取得や処理が必要な場合にFunction Callingで呼び出してください。あなた自身の知識だけでは正確に答えられない質問や、ツールを使った処理が必要な場面で使います。挨拶・雑談・一般的な会話には使わないでください。ツール名を声に出さないでください。",
     behavior: Behavior.NON_BLOCKING,
     parameters: {
       type: Type.OBJECT,
@@ -19,6 +19,23 @@ export const liveToolDeclarations: FunctionDeclaration[] = [
         },
       },
       required: ["request"],
+    },
+  },
+  {
+    name: "get_meeting_state",
+    description:
+      "会議の現在の状態を取得する。タスク一覧、議題、メモ、最近のチャットメッセージなどを確認できる。会議の状況を把握したいとき、チャットメッセージを確認したいとき、前回の確認から時間が経ったときに呼び出してください。",
+    behavior: Behavior.NON_BLOCKING,
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        category: {
+          type: Type.STRING,
+          description:
+            "取得するカテゴリ: tasks（タスク一覧）, agenda（議題）, notes（メモ・決定事項）, recent_messages（最近のメッセージ）, all（すべて）",
+        },
+      },
+      required: ["category"],
     },
   },
 ];

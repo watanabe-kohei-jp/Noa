@@ -26,3 +26,8 @@ export type ClientContentLog = {
 
 // Live API モード
 export type LiveMode = "passive" | "active";
+
+/** page.tsx から Live AI にテキストを送信するための API */
+export interface LivePanelAPI {
+  sendText: (text: string) => void;
+}

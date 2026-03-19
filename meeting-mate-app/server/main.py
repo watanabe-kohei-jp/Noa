@@ -153,6 +153,7 @@ class DBTranscriptEntry(BaseModel):
     userName: Optional[str] = None
     timestamp: str
     role: Optional[str] = None
+    origin: Optional[str] = None
 
 
 class TaskPayload(BaseModel):
@@ -727,16 +728,13 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             userId="ai",
             userName="AI",
             timestamp=datetime.utcnow().isoformat() + "Z",
-            role="ai"
+            role="ai",
+            origin="agent_summary"
         )
 
         try:
-            latest_transcript = transcript_ref.get() or []
-            if not isinstance(latest_transcript, list):
-                latest_transcript = []
-            latest_transcript.append(new_ai_entry.model_dump())
-            transcript_ref.set(latest_transcript)
-            logger.info(f"Appended AI instructions to transcript. New length: {len(latest_transcript)}")
+            transcript_ref.push(new_ai_entry.model_dump())
+            logger.info(f"Pushed AI instructions to transcript (push-key format).")
         except Exception as e:
             logger.error(f"Error updating transcript: {e}", exc_info=True)
 
@@ -810,17 +808,14 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
                     userId=task_payload.speakerId,
                     userName=resolved_speaker_name,
                     timestamp=datetime.utcnow().isoformat() + "Z",
-                    role="user"
+                    role="user",
+                    origin="human_chat"
                 )
                 new_db_entry_dict = new_db_entry.model_dump()
 
-                current_transcript_list = transcript_ref.get()
-                if current_transcript_list is None or not isinstance(current_transcript_list, list):
-                    current_transcript_list = []
-                current_transcript_list.append(new_db_entry_dict)
-                transcript_ref.set(current_transcript_list)
+                transcript_ref.push(new_db_entry_dict)
                 logger.info(
-                    f"[{room_id}] Appended new message to transcript. New length: {len(current_transcript_list)}")
+                    f"[{room_id}] Pushed new message to transcript (push-key format).")
 
         # デモルームの場合はここで処理を終了
         if room_id == ALLOWED_DEMO_ROOM:
@@ -831,10 +826,34 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
         if session_data is None:
             session_data = {}
 
-        db_transcript_entries = session_data.get("transcript", [])
+        # transcript を Object (push-key) / list 両対応で読み込み
+        raw_transcript = session_data.get("transcript", {})
+        if isinstance(raw_transcript, dict):
+            db_transcript_entries = list(raw_transcript.values())
+        elif isinstance(raw_transcript, list):
+            db_transcript_entries = raw_transcript  # 後方互換
+        else:
+            db_transcript_entries = []
 
-        user_messages = [entry for entry in db_transcript_entries if entry.get("role") != "ai"]
-        current_user_message_count = len(user_messages)
+        # origin allowlist でトリガー対象を判定（ループ防止）
+        TRIGGERABLE_ORIGINS = {"human_chat", "human_stt"}
+
+        def is_triggerable(entry: dict) -> bool:
+            origin = entry.get("origin")
+            if origin:
+                return origin in TRIGGERABLE_ORIGINS
+            # 後方互換: origin 未設定 → source/role から推定
+            if entry.get("role") == "ai":
+                return False
+            source = entry.get("source")
+            if source in ("stt", "manual"):
+                return True
+            if source == "live-api" and entry.get("role") == "user":
+                return True
+            return entry.get("role") != "ai"
+
+        trigger_messages = [e for e in db_transcript_entries if is_triggerable(e)]
+        current_user_message_count = len(trigger_messages)
 
         last_processed_count = session_data.get("last_llm_processed_message_count", 0)
         if last_processed_count > current_user_message_count:
