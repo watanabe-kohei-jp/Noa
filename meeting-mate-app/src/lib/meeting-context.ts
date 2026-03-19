@@ -22,7 +22,9 @@ import type {
 export function toTranscriptArray(raw: unknown): TranscriptEntry[] {
   if (Array.isArray(raw)) return raw;
   if (raw && typeof raw === "object") {
-    return Object.values(raw as Record<string, TranscriptEntry>);
+    const arr = Object.values(raw as Record<string, TranscriptEntry>);
+    arr.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
+    return arr;
   }
   return [];
 }

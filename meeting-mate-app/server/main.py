@@ -523,11 +523,7 @@ async def add_message_endpoint(request_data: AddMessageRequest):
         )
 
         transcript_ref = room_ref.child("transcript")
-        current_transcript_list = transcript_ref.get()
-        if not isinstance(current_transcript_list, list):
-            current_transcript_list = []
-        current_transcript_list.append(new_db_entry.model_dump())
-        transcript_ref.set(current_transcript_list)
+        transcript_ref.push(new_db_entry.model_dump())
 
         logger.info(
             f"Message added to demo room {request_data.roomId} by {display_name}")
