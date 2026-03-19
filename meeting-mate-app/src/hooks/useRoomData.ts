@@ -1,6 +1,6 @@
 // meeting-mate-app/src/hooks/useRoomData.ts
 import { useState, useEffect, useCallback } from 'react';
-import { ref, onValue, off, set, push, get } from 'firebase/database';
+import { ref, onValue, set, push, get } from 'firebase/database';
 import { database as db } from '@/firebase';
 import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession } from '@/types/data';
 import { useAuth } from '@/contexts/AuthContext';
@@ -108,7 +108,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     setIsLoading(true);
     setError(null);
     const roomRef = ref(firebaseDb, `rooms/${roomId}`);
-    const listener = onValue(roomRef, (snapshot) => {
+    const unsubscribe = onValue(roomRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
         setRoomData(data as SessionData);
@@ -172,9 +172,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       setIsLoading(false);
     });
 
-    return () => {
-      off(roomRef, 'value', listener);
-    };
+    return () => { unsubscribe(); };
   }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 旧形式データ読み込み（sessions が存在しない場合のフォールバック）
@@ -247,13 +245,21 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
 
   // セッションレベルデータのリスナー
   useEffect(() => {
+    // セッション切り替え時に即座にリセット（stale データ防止）
+    setTranscript([]);
+    setTasks([]);
+    setNotes([]);
+    setCurrentAgenda(null);
+    setSuggestedNextTopics([]);
+    setOverviewDiagramData(null);
+
     if (!roomId || !currentSessionId) return;
 
     const firebaseDb = db();
     if (!firebaseDb) return;
 
     const sessionRef = ref(firebaseDb, `rooms/${roomId}/sessions/${currentSessionId}`);
-    const listener = onValue(sessionRef, (snapshot) => {
+    const unsubscribe = onValue(sessionRef, (snapshot) => {
       const data = snapshot.val();
       if (!data) {
         setTranscript([]);
@@ -332,9 +338,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       }
     });
 
-    return () => {
-      off(sessionRef, 'value', listener);
-    };
+    return () => { unsubscribe(); };
   }, [roomId, currentSessionId]);
 
   // 新しいセッションを作成
