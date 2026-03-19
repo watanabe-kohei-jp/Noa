@@ -11,6 +11,9 @@ import {
   Sparkles,
   Loader2,
 } from "lucide-react";
+import ImageAttachmentButton from "./ImageAttachmentButton";
+import ImagePreviewOverlay from "./ImagePreviewOverlay";
+import { resizeImageToBase64 } from "../../lib/image-utils";
 import { LiveAPIProvider, useLiveAPIContext } from "../../contexts/LiveAPIContext";
 import { AudioRecorder } from "../../lib/audio-recorder";
 import { LiveToolHandler, MeetingContextProvider } from "../../lib/live-tools/tool-handler";
@@ -111,6 +114,77 @@ function LivePanelInner({
     client.send({ text }, true);
     console.log("[LivePanel] sendText:", text.slice(0, 50));
   }, [client, connected]);
+
+  // sendImage: 画像を Live AI に送信する (sendRealtimeInput 経由)
+  const sendImage = useCallback((base64: string, mimeType: string) => {
+    if (!connected) {
+      console.warn("[LivePanel] sendImage: not connected");
+      return;
+    }
+    client.sendRealtimeInput([{ mimeType, data: base64 }]);
+    console.log("[LivePanel] sendImage: sent", mimeType, `${Math.round(base64.length / 1024)}KB`);
+  }, [connected, client]);
+
+  // Image attachment state
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [imagePreviewStatus, setImagePreviewStatus] = useState<"pending" | "sent" | "error">("pending");
+  const [imageErrorMessage, setImageErrorMessage] = useState<string>("");
+  const pendingImageRef = useRef<{ base64: string; mimeType: string } | null>(null);
+
+  const handleImageReady = useCallback((base64: string, mimeType: string) => {
+    pendingImageRef.current = { base64, mimeType };
+  }, []);
+
+  const handleImagePreview = useCallback((previewUrl: string) => {
+    setImagePreviewUrl(previewUrl);
+    setImagePreviewStatus("pending");
+    setImageErrorMessage("");
+  }, []);
+
+  const handleImageError = useCallback((message: string) => {
+    setImagePreviewUrl(null);
+    setImagePreviewStatus("error");
+    setImageErrorMessage(message);
+    pendingImageRef.current = null;
+  }, []);
+
+  const handleImageSend = useCallback(() => {
+    const pending = pendingImageRef.current;
+    if (!pending) return;
+    sendImage(pending.base64, pending.mimeType);
+    setImagePreviewStatus("sent");
+    pendingImageRef.current = null;
+  }, [sendImage]);
+
+  const handleImageCancel = useCallback(() => {
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    setImagePreviewUrl(null);
+    setImagePreviewStatus("pending");
+    setImageErrorMessage("");
+    pendingImageRef.current = null;
+  }, [imagePreviewUrl]);
+
+  // Clipboard paste handler for images
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    if (!connected) return;
+    const items = e.clipboardData.items;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) return;
+        try {
+          const previewUrl = URL.createObjectURL(file);
+          handleImagePreview(previewUrl);
+          const { base64, mimeType } = await resizeImageToBase64(file);
+          handleImageReady(base64, mimeType);
+        } catch (err) {
+          handleImageError(err instanceof Error ? err.message : "画像の処理に失敗しました。");
+        }
+        return;
+      }
+    }
+  }, [connected, handleImagePreview, handleImageReady, handleImageError]);
 
   // onReady で sendText API を公開
   useEffect(() => {
@@ -445,7 +519,16 @@ function LivePanelInner({
     `${Math.min(vol * 300, 100)}%`;
 
   return (
-    <div className="relative flex items-center gap-2">
+    <div className="relative flex items-center gap-2" onPaste={handlePaste}>
+      {/* Image preview overlay */}
+      <ImagePreviewOverlay
+        previewUrl={imagePreviewUrl}
+        status={imagePreviewStatus}
+        errorMessage={imageErrorMessage}
+        onSend={handleImageSend}
+        onCancel={handleImageCancel}
+      />
+
       {/* ThinkingQueue overlay */}
       <ThinkingQueuePanel />
 
@@ -510,6 +593,16 @@ function LivePanelInner({
         >
           {tabAudioActive ? <MonitorOff size={16} /> : <MonitorUp size={16} />}
         </button>
+      )}
+
+      {/* Image attachment */}
+      {connected && (
+        <ImageAttachmentButton
+          onImageReady={handleImageReady}
+          onPreview={handleImagePreview}
+          onError={handleImageError}
+          disabled={!connected}
+        />
       )}
 
       {/* Brain processing indicator */}
