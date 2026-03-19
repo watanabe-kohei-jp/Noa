@@ -19,8 +19,8 @@ const mockSessionState: SessionMeetingState = {
     { userId: "noa", userName: "Noa", text: "hello", timestamp: "t2", role: "ai", origin: "live_ai" },
   ],
   tasks: [{ id: "1", title: "Task1", assignee: "Alice", status: "todo", priority: "high" }],
-  notes: [{ type: "decision", text: "Note1" }],
-  currentAgenda: { mainTopic: "Topic1", details: [{ text: "Detail1" }] },
+  notes: [{ id: "n1", type: "decision", text: "Note1", timestamp: "t1" }],
+  currentAgenda: { mainTopic: "Topic1", details: [{ id: "d1", text: "Detail1" }] },
   suggestedNextTopics: ["Next1"],
   participants: [{ id: "u1", name: "Alice", role: "host" }],
 };

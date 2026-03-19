@@ -65,7 +65,7 @@ describe("buildBrainContext", () => {
         { userId: "uid1", text: "hello", timestamp: "2026-01-01", role: "user" },
       ],
       tasks: [{ id: "1", title: "Task1", assignee: "Alice", status: "todo", priority: "high" }],
-      notes: [{ type: "decision", text: "Note1" }],
+      notes: [{ id: "n1", type: "decision", text: "Note1", timestamp: "t1" }],
     };
     const ctx = buildBrainContext(roomData, "room-1");
     expect(ctx.room_id).toBe("room-1");
@@ -88,8 +88,8 @@ describe("buildLiveMeetingState", () => {
       { userId: "ai", userName: "AI", text: "summary", timestamp: "t4", role: "ai", origin: "agent_summary" },
     ] as TranscriptEntry[],
     tasks: [{ id: "1", title: "Task1", assignee: "Alice", status: "todo", priority: "high" }],
-    notes: [{ type: "decision", text: "Note1" }],
-    currentAgenda: { mainTopic: "Topic1", details: [{ text: "Detail1" }] },
+    notes: [{ id: "n1", type: "decision", text: "Note1", timestamp: "t1" }],
+    currentAgenda: { mainTopic: "Topic1", details: [{ id: "d1", text: "Detail1" }] },
     suggestedNextTopics: ["Next1"],
     participants: [{ id: "u1", name: "Alice", role: "host" }],
     ...overrides,
