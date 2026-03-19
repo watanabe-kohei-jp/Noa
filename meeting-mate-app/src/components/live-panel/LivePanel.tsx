@@ -282,6 +282,75 @@ function LivePanelInner({
     };
   }, [connected, client, sharedStream, audioRecorder]);
 
+  // Vision snapshot: クライアント側差分検出 + バックエンド送信
+  const lastSnapshotPixelsRef = useRef<Uint8Array | null>(null);
+  const lastSnapshotTimeRef = useRef<number>(0);
+  const VISION_MIN_INTERVAL = 30_000; // 30秒間隔
+  const VISION_DIFF_THRESHOLD = 0.15; // 15% 以上の変化で送信
+
+  const computeAndSendVisionSnapshot = useCallback(
+    (sourceCanvas: HTMLCanvasElement) => {
+      const now = Date.now();
+      if (now - lastSnapshotTimeRef.current < VISION_MIN_INTERVAL) return;
+      if (!roomId) return;
+
+      // 32x32 グレースケールで差分検出
+      const small = document.createElement("canvas");
+      small.width = 32;
+      small.height = 32;
+      const sCtx = small.getContext("2d");
+      if (!sCtx) return;
+      sCtx.drawImage(sourceCanvas, 0, 0, 32, 32);
+      const imgData = sCtx.getImageData(0, 0, 32, 32);
+      const pixels = new Uint8Array(32 * 32);
+      for (let i = 0; i < pixels.length; i++) {
+        const r = imgData.data[i * 4];
+        const g = imgData.data[i * 4 + 1];
+        const b = imgData.data[i * 4 + 2];
+        pixels[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+      }
+
+      if (lastSnapshotPixelsRef.current) {
+        let diffCount = 0;
+        for (let i = 0; i < pixels.length; i++) {
+          if (Math.abs(pixels[i] - lastSnapshotPixelsRef.current[i]) > 20) {
+            diffCount++;
+          }
+        }
+        const diffRatio = diffCount / pixels.length;
+        if (diffRatio < VISION_DIFF_THRESHOLD) return; // 変化なし → skip
+      }
+
+      lastSnapshotPixelsRef.current = pixels;
+      lastSnapshotTimeRef.current = now;
+
+      // 分析用に少し高解像度でキャプチャ (50%, 60% quality)
+      const analysisCanvas = document.createElement("canvas");
+      analysisCanvas.width = sourceCanvas.width * 2; // 25% → 50%
+      analysisCanvas.height = sourceCanvas.height * 2;
+      const aCtx = analysisCanvas.getContext("2d");
+      if (!aCtx) return;
+      // sourceCanvas の元の video から描画
+      const videoEl = videoRef.current;
+      if (!videoEl) return;
+      aCtx.drawImage(videoEl, 0, 0, analysisCanvas.width, analysisCanvas.height);
+      const b64 = analysisCanvas.toDataURL("image/jpeg", 0.6);
+      const data = b64.slice(b64.indexOf(",") + 1);
+
+      authFetch("/api/vision/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomId,
+          sessionId: currentSessionId,
+          imageBase64: data,
+          timestamp: new Date().toISOString(),
+        }),
+      }).catch((err) => console.warn("[LivePanel] Vision snapshot failed:", err));
+    },
+    [roomId, currentSessionId]
+  );
+
   // Tab audio capture
   const stopTabAudio = useCallback(() => {
     tabStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -350,6 +419,9 @@ function LivePanelInner({
           const base64 = canvas.toDataURL("image/jpeg", 0.5);
           const data = base64.slice(base64.indexOf(",") + 1);
           client.sendRealtimeInput([{ mimeType: "image/jpeg", data }]);
+
+          // Vision 分析: 差分検出 + バックエンド送信
+          computeAndSendVisionSnapshot(canvas);
 
           setTimeout(sendFrame, 2000); // 0.5 FPS
         };

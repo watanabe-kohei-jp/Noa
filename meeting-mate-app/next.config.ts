@@ -62,6 +62,10 @@ const nextConfig: NextConfig = {
           source: '/api/memory/:path*',
           destination: `${BACKEND_URL}/api/memory/:path*`,
         },
+        {
+          source: '/api/vision/:path*',
+          destination: `${BACKEND_URL}/api/vision/:path*`,
+        },
       ];
     },
   }),
