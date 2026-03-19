@@ -39,9 +39,10 @@ export interface UseLivePanelReturn {
   mode: LiveMode;
   toggleMode: () => void;
 
-  // Volume
+  // Volume & VAD
   inVolume: number;
   outVolume: number;
+  isSpeaking: boolean;
 
   // Tab audio
   tabAudioActive: boolean;
@@ -79,6 +80,7 @@ export function useLivePanel({
 
   // Audio recording
   const [inVolume, setInVolume] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [tabAudioActive, setTabAudioActive] = useState(false);
   const [audioRecorder] = useState(() => new AudioRecorder());
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -107,9 +109,21 @@ export function useLivePanel({
         status: "todo",
       });
     },
-    onDiagram: () => {},
+    onDiagram: (mermaidCode: string, title: string) => {
+      if (!roomId || !mermaidCode) return;
+      const db = getDatabase();
+      if (!db) return;
+      const path = currentSessionId
+        ? `rooms/${roomId}/sessions/${currentSessionId}/overviewDiagram`
+        : `rooms/${roomId}/overviewDiagram`;
+      const diagramRef = ref(db, path);
+      set(diagramRef, {
+        title: title || "会議の概要図",
+        mermaidDefinition: mermaidCode,
+      });
+    },
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue);
+  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
 
   // Accumulate current model turn text
   const currentModelTextRef = useRef<string>("");
@@ -225,8 +239,12 @@ export function useLivePanel({
       audioRecorder
         .on("data", onData)
         .on("volume", setInVolume)
+        .on("vad", (speaking: boolean) => setIsSpeaking(speaking))
         .start(sharedStream)
-        .then(() => console.log("[useLivePanel] audioRecorder started OK"))
+        .then(() => {
+          audioRecorder.setVadEnabled(true);
+          console.log("[useLivePanel] audioRecorder started OK (VAD enabled)");
+        })
         .catch((err: unknown) =>
           console.warn("[useLivePanel] audioRecorder start failed:", err)
         );
@@ -235,7 +253,8 @@ export function useLivePanel({
     }
 
     return () => {
-      audioRecorder.off("data", onData).off("volume", setInVolume);
+      audioRecorder.off("data", onData).off("volume", setInVolume).off("vad");
+      setIsSpeaking(false);
       audioRecorder.stop();
     };
   }, [connected, client, sharedStream, audioRecorder]);
@@ -352,6 +371,7 @@ export function useLivePanel({
     isProcessing,
     canConnect,
     noStreamWarning,
+    isSpeaking,
     videoRef,
     canvasRef,
   };

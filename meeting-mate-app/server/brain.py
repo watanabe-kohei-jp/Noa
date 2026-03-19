@@ -18,6 +18,8 @@ from config import BRAIN_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAULT_GEMINI_API_KEY,
 from knowledge_base import MockKnowledgeBase
 from llm_provider import llm_complete, llm_complete_with_tools, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
+from mermaid_utils import validate_and_clean_mermaid
+from meeting_memory import get_meeting_memory
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +52,12 @@ TOOL_SELECTION_PROMPT = """あなたは会議AIアシスタント「Noa」のブ
 - create_task: タスク登録
   args: {{ "title": "タスク名", "assignee": "担当者", "due_date": "YYYY-MM-DD", "priority": "high|medium|low" }}
 
-- generate_diagram: Mermaid記法の図を生成
-  args: {{ "description": "図の説明", "diagram_type": "flowchart|sequence|gantt|mindmap|pie" }}
+- generate_diagram: Mermaid記法の図を生成（graph TD/LR のみ対応）
+  args: {{ "description": "図の説明" }}
+
+- search_past_meetings: 過去の会議セッションの内容を検索
+  「前回の会議で決まったことは？」「先週のプロジェクトXの議論は？」等
+  args: {{ "query": "検索クエリ（自然言語）" }}
 
 - deep_analysis: 以下のいずれかに該当する質問に使用:
   (1) 複雑な分析・比較・リスク評価・多角的な検討
@@ -262,12 +268,68 @@ async def execute_tool(tool_name: str, args: dict, meeting_context: dict) -> dic
 
     elif tool_name == "generate_diagram":
         description = args.get("description", "")
-        diagram_type = args.get("diagram_type", "flowchart")
+        try:
+            mermaid_prompt = f"""以下の説明に基づいて、Mermaid 記法の graph TD 図を生成してください。
+
+**出力ルール:**
+- graph TD または graph LR で開始すること（他のタイプは不可）
+- コードブロックや説明文は不要、Mermaid コードのみ返すこと
+- click, href, javascript:, %{{init は使用禁止
+- classDef でフラットデザインのスタイルを定義すること
+- ノードへのクラス適用は class コマンドを使用（:::は禁止）
+- subgraph タイトルはダブルクォートで囲むこと
+
+説明: {description}"""
+
+            mermaid_raw = await llm_complete(
+                model=BRAIN_LLM_MODEL,
+                prompt=mermaid_prompt,
+                api_key=get_default_api_key(BRAIN_LLM_MODEL),
+                temperature=0.3,
+                max_tokens=2000,
+            )
+            mermaid_code = validate_and_clean_mermaid(mermaid_raw)
+            if not mermaid_code:
+                return {"success": False, "message": "有効な Mermaid コードを生成できませんでした。"}
+
+            # タイトル: description を30文字に切り詰め
+            title = description.strip()[:30]
+            if len(description.strip()) > 30:
+                title += "..."
+            title = f"概要図: {title}" if title else "会議の概要図"
+
+            return {
+                "success": True,
+                "mermaid_code": mermaid_code,
+                "title": title,
+                "description": description,
+            }
+        except Exception as e:
+            logger.error(f"[Brain] generate_diagram failed: {e}")
+            return {"success": False, "message": f"図の生成に失敗しました: {e}"}
+
+    elif tool_name == "search_past_meetings":
+        query = args.get("query", "")
+        if not query:
+            return {"found": False, "message": "検索クエリが必要です。"}
+        room_id = meeting_context.get("room_id", "")
+        if not room_id:
+            return {"found": False, "message": "ルーム情報がありません。"}
+        memory = get_meeting_memory()
+        results = await memory.search(query, room_id=room_id)
+        if not results:
+            return {"found": False, "message": "過去の会議データが見つかりませんでした。まだ終了した会議がないか、関連するデータがありません。"}
         return {
-            "success": True,
-            "description": description,
-            "diagram_type": diagram_type,
-            "message": f"{diagram_type}の図を生成してください。",
+            "found": True,
+            "results": [
+                {
+                    "session_name": r.get("metadata", {}).get("session_name", "不明"),
+                    "date": r.get("metadata", {}).get("started_at", "不明"),
+                    "summary": r.get("summary", ""),
+                }
+                for r in results
+            ],
+            "query": query,
         }
 
     elif tool_name == "deep_analysis":
@@ -299,8 +361,9 @@ def extract_actions(tool_name: str, tool_result: dict) -> list[dict]:
         actions.append({
             "action": "generate_diagram",
             "data": {
+                "mermaid_code": tool_result.get("mermaid_code", ""),
                 "description": tool_result.get("description", ""),
-                "diagram_type": tool_result.get("diagram_type", "flowchart"),
+                "title": tool_result.get("title", "会議の概要図"),
             },
         })
     return actions

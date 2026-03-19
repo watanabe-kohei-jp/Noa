@@ -3,6 +3,7 @@
 // テキストを /tts エンドポイントに送信し、返された音声を再生
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { authFetch } from '../lib/api-client';
 
 interface UseBackendTTSOptions {
   roomId: string | null;
@@ -39,7 +40,7 @@ export const useBackendTTS = (options: UseBackendTTSOptions) => {
     setIsSpeaking(true);
 
     try {
-      const response = await fetch('/tts', {
+      const response = await authFetch('/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

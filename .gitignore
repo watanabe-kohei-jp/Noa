@@ -71,6 +71,9 @@ modules/*/.terraform.lock.hcl
 __pycache__/
 *.py[cod]
 
+# ChromaDB ローカルデータ
+meeting-mate-app/server/chroma_data/
+
 # Node.js系
 node_modules/
 # Yarn

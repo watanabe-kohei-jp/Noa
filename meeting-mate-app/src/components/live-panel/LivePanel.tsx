@@ -17,6 +17,7 @@ import type { SessionData } from "../../types/data";
 import { ThinkingQueueProvider } from "../../contexts/ThinkingQueueContext";
 import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
 import { useLivePanel } from "../../hooks/useLivePanel";
+import { authFetch } from "../../lib/api-client";
 
 /* ------------------------------------------------------------------ */
 /*  LivePanelInner - pure presentation                                 */
@@ -49,6 +50,7 @@ function LivePanelInner({
     isProcessing,
     canConnect,
     noStreamWarning,
+    isSpeaking,
     videoRef,
     canvasRef,
   } = useLivePanel({
@@ -147,9 +149,15 @@ function LivePanelInner({
         </span>
       )}
 
-      {/* Volume indicators (compact) */}
+      {/* Volume indicators (compact) + VAD indicator */}
       {connected && (
         <div className="flex items-center gap-1 flex-shrink-0">
+          <span
+            className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${
+              isSpeaking ? "bg-green-500" : "bg-gray-400"
+            }`}
+            title={isSpeaking ? "発話検出中" : "無音"}
+          />
           <div className="w-8 h-1.5 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
             <div
               className="h-full bg-green-500 transition-all duration-75"
@@ -189,7 +197,7 @@ export default function LivePanel({
   const [keyError, setKeyError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/config")
+    authFetch("/api/config")
       .then((res) => res.json())
       .then((data) => {
         if (data.geminiApiKey) {

@@ -10,4 +10,5 @@ cryptography
 python-multipart
 aiohttp
 google-cloud-speech
+chromadb
 google-genai

@@ -31,6 +31,8 @@ interface UseRoomDataResult {
   createSession: (name?: string) => Promise<string | null>;
   switchSession: (sessionId: string) => void;
   endSession: (sessionId: string) => void;
+  renameSession: (sessionId: string, newName: string) => void;
+  deleteSession: (sessionId: string) => void;
 }
 
 export const useRoomData = (roomId: string | null): UseRoomDataResult => {
@@ -361,8 +363,8 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     setCurrentSessionId(sessionId);
   }, [roomId]);
 
-  // セッション終了
-  const endSession = useCallback((sessionId: string) => {
+  // セッション終了 → 新セッション自動作成
+  const endSession = useCallback(async (sessionId: string) => {
     if (!roomId) return;
     const firebaseDb = db();
     if (!firebaseDb) return;
@@ -370,8 +372,47 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     // status と endedAt を更新
     const statusRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/status`);
     const endedRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/endedAt`);
-    set(statusRef, "ended");
-    set(endedRef, new Date().toISOString());
+    await set(statusRef, "ended");
+    await set(endedRef, new Date().toISOString());
+
+    // バックエンドで要約生成+RAG保存をトリガー (fire-and-forget)
+    fetch("/api/sessions/end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, session_id: sessionId }),
+    }).catch(err => console.error("[useRoomData] Failed to trigger session summary:", err));
+
+    // 新セッションを自動作成して切替
+    await createSession();
+  }, [roomId, createSession]);
+
+  // セッション名変更
+  const renameSession = useCallback((sessionId: string, newName: string) => {
+    if (!roomId) return;
+    const firebaseDb = db();
+    if (!firebaseDb) return;
+
+    const nameRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/name`);
+    set(nameRef, newName);
+  }, [roomId]);
+
+  // セッション削除
+  const deleteSession = useCallback(async (sessionId: string) => {
+    if (!roomId) return;
+
+    try {
+      const res = await fetch(`/api/sessions/${roomId}/${sessionId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.detail || "削除に失敗しました");
+        return;
+      }
+    } catch (err) {
+      console.error("[useRoomData] Failed to delete session:", err);
+      alert("セッション削除に失敗しました");
+    }
   }, [roomId]);
 
   // participantsロード後にpageCurrentUser.nameを更新
@@ -440,5 +481,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     createSession,
     switchSession,
     endSession,
+    renameSession,
+    deleteSession,
   };
 };

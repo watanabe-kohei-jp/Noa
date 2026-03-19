@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { GenAILiveClient } from "../lib/genai-live-client";
 import type { SessionData, TranscriptEntry } from "../types/data";
 import type { BrainResult } from "../lib/live-tools/tool-handler";
+import { authFetch } from "../lib/api-client";
 
 interface BrainAction {
   action: string;
@@ -51,13 +52,15 @@ function toArray<T>(raw: unknown): T[] {
 }
 
 function buildMeetingContext(
-  roomData: SessionData | null
+  roomData: SessionData | null,
+  roomId?: string | null,
 ): Record<string, unknown> {
   if (!roomData) return {};
   const transcriptArr = toTranscriptArray(roomData.transcript);
   const tasksArr = toArray<SessionData["tasks"][number]>(roomData.tasks);
   const notesArr = toArray<SessionData["notes"][number]>(roomData.notes);
   return {
+    room_id: roomId || "",
     title: roomData.sessionTitle || roomData.projectTitle || "",
     participants: Object.entries(roomData.participants || {}).map(
       ([id, p]) => ({ id, name: p.name, role: p.role })
@@ -92,7 +95,8 @@ export function useBrain(
   connected: boolean,
   roomData: SessionData | null,
   callbacks?: BrainCallbacks,
-  thinkingQueue?: ThinkingQueueCallbacks
+  thinkingQueue?: ThinkingQueueCallbacks,
+  roomId?: string | null,
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
   const inFlightCountRef = useRef(0);
@@ -117,16 +121,16 @@ export function useBrain(
       });
 
       try {
-        const meetingContext = buildMeetingContext(roomData);
+        const meetingContext = buildMeetingContext(roomData, roomId);
         console.log("[useBrain] calling /api/brain...");
 
-        // 60秒タイムアウト付き fetch
+        // 60秒タイムアウト付き authFetch
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
         let res: Response;
         try {
-          res = await fetch("/api/brain", {
+          res = await authFetch("/api/brain", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -212,7 +216,7 @@ export function useBrain(
             if (action.action === "generate_diagram" && action.data) {
               callbacksRef.current?.onDiagram?.(
                 (action.data.mermaid_code as string) || "",
-                (action.data.description as string) || ""
+                (action.data.title as string) || ""
               );
             }
           }
@@ -235,7 +239,7 @@ export function useBrain(
         setIsProcessing(inFlightCountRef.current > 0);
       }
     },
-    [roomData]
+    [roomData, roomId]
   );
 
   return { isProcessing, requestBrain };
