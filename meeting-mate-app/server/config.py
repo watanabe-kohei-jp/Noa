@@ -63,6 +63,7 @@ if not FIREBASE_DATABASE_URL:
 LLM_ORCHESTRATOR_MODEL_NAME = os.getenv(
     "LLM_ORCHESTRATOR_MODEL_NAME", "gemini-2.5-flash")
 LLM_TRIGGER_MESSAGE_COUNT = int(os.getenv("LLM_TRIGGER_MESSAGE_COUNT", 3))
+LLM_TRANSCRIPT_LIMIT = int(os.getenv("LLM_TRANSCRIPT_LIMIT", 20))
 
 # ============================================================
 # Agent Configuration

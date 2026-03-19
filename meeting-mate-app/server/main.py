@@ -3,7 +3,7 @@ from __future__ import annotations
 
 # マルチプロバイダー LLM 設定
 from config import (
-    DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT,
+    DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT, LLM_TRANSCRIPT_LIMIT,
     AGENT_CONFIG_DIR, DEFAULT_GEMINI_API_KEY, get_default_api_key
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
@@ -365,12 +365,21 @@ async def _trigger_agents_from_vision(room_id: str, session_id: Optional[str]):
             speakerName="Vision System",
         )
 
+        # transcript を直近 N 件にスライス + room-level データを軽量取得
+        recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
+        room_ref = db.reference(f"rooms/{room_id}")
+        room_data = {
+            "participants": room_ref.child("participants").get() or {},
+            "representativeMode": room_ref.child("representativeMode").get() or False,
+        }
+
         session_ref.child("is_llm_processing").set(True)
         try:
             from fastapi import BackgroundTasks as BT
             dummy_bg = BT()
             await orchestrate_agents(
-                task_payload, dummy_bg, db_transcript_entries, None
+                task_payload, dummy_bg, recent_entries, None,
+                session_data=session_data, room_data=room_data
             )
         finally:
             session_ref.child("is_llm_processing").set(False)
@@ -523,11 +532,7 @@ async def add_message_endpoint(request_data: AddMessageRequest):
         )
 
         transcript_ref = room_ref.child("transcript")
-        current_transcript_list = transcript_ref.get()
-        if not isinstance(current_transcript_list, list):
-            current_transcript_list = []
-        current_transcript_list.append(new_db_entry.model_dump())
-        transcript_ref.set(current_transcript_list)
+        transcript_ref.push(new_db_entry.model_dump())
 
         logger.info(
             f"Message added to demo room {request_data.roomId} by {display_name}")
@@ -574,17 +579,17 @@ async def process_single_agent(
         if hasattr(agent, 'execute'):
             room_ref_path = f"rooms/{task_payload.roomId}"
             session_data_path = get_session_data_path(task_payload.roomId, task_payload.sessionId)
-            room_data_snapshot = db.reference(room_ref_path).get() or {}
-            session_data_snapshot = db.reference(session_data_path).get() or {} if task_payload.sessionId else room_data_snapshot
+            # participants のみ room-level から個別取得（room 全体の再取得を廃止）
+            participants = db.reference(f"{room_ref_path}/participants").get() or {}
+            session_data_snapshot = db.reference(session_data_path).get() or {} if task_payload.sessionId else {}
             current_data_for_agent = {
-                "participants": room_data_snapshot.get("participants"),
+                "participants": participants,
                 "tasks": session_data_snapshot.get("tasks"),
                 "notes": session_data_snapshot.get("notes"),
                 "agenda": session_data_snapshot.get("currentAgenda"),
                 "overviewDiagram": session_data_snapshot.get("overviewDiagram"),
                 "suggestedNextTopics": session_data_snapshot.get("suggestedNextTopics"),
                 "visionContext": session_data_snapshot.get("visionContext"),
-                "full_room_data": room_data_snapshot
             }
             task_payload.currentParticipants = current_data_for_agent["participants"]
             task_payload.currentTasks = current_data_for_agent["tasks"]
@@ -627,7 +632,7 @@ async def process_single_agent(
         results_dict[agent_name] = {"error": str(e)}
 
 
-async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None):
+async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None, session_data: Optional[Dict[str, Any]] = None, room_data: Optional[Dict[str, Any]] = None):
     logger.info(
         f"Orchestrating agents for task: {task_payload.taskId}, room: {task_payload.roomId}")
 
@@ -678,7 +683,11 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             llm_transcript_messages.append(LLMMessage(
                 role="user", parts=[{"text": "[変換エラー]"}]))
 
-    session_data_for_llm_context = db.reference(room_ref_path).get() or {}
+    # session_data + room_data を合成（room 全体の再取得を廃止）
+    session_data_for_llm_context = dict(session_data) if session_data else {}
+    if room_data:
+        session_data_for_llm_context["participants"] = room_data.get("participants", {})
+        session_data_for_llm_context["representativeMode"] = room_data.get("representativeMode", False)
     session_data_for_llm_context['transcript'] = [
         msg.model_dump() for msg in llm_transcript_messages]
     session_data_json_str = json.dumps(
@@ -871,14 +880,13 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         except Exception as e:
             logger.error(f"Error updating transcript: {e}", exc_info=True)
 
-    # セッションデータとルームデータの最新を取得
+    # セッションデータと participants の最新を取得（room 全体の再取得を廃止）
     session_data_after = db.reference(session_data_path).get() or {}
-    room_data_after_scheduling = db.reference(room_ref_path).get() or {}
+    participants_after = db.reference(f"{room_ref_path}/participants").get() or {}
 
     final_result = AgentResult(
         invokedAgents=active_agent_names,
-        updatedParticipants=list(room_data_after_scheduling.get("participants", {}).values(
-        )) if room_data_after_scheduling.get("participants") else None,
+        updatedParticipants=list(participants_after.values()) if participants_after else None,
         updatedTasks=list(session_data_after.get(
             "tasks", {}).values()) if session_data_after.get("tasks") else None,
         updatedNotes=list(session_data_after.get(
@@ -1008,8 +1016,19 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
             session_ref.child("is_llm_processing").set(True)
 
             try:
+                # transcript を直近 N 件にスライスして LLM に渡す
+                recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
+
+                # room-level データは transcript を含まない軽量取得
+                room_ref = db.reference(f"rooms/{room_id}")
+                room_data = {
+                    "participants": room_ref.child("participants").get() or {},
+                    "representativeMode": room_ref.child("representativeMode").get() or False,
+                }
+
                 agent_processing_result = await orchestrate_agents(
-                    task_payload, background_tasks, db_transcript_entries, task_payload.llmApiKey)
+                    task_payload, background_tasks, recent_entries,
+                    task_payload.llmApiKey, session_data=session_data, room_data=room_data)
 
                 session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
                 session_ref.child("is_llm_processing").set(False)
