@@ -8,7 +8,7 @@ from config import (
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
-from brain import process_brain_request
+from brain import process_brain_request, process_proactive_check
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
@@ -260,6 +260,34 @@ async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_use
         return result
     except Exception as e:
         logger.error(f"Brain processing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
+# Endpoints: Proactive Check
+# ================================================================
+
+
+class ProactiveCheckRequest(BaseModel):
+    room_id: str
+    session_id: Optional[str] = None
+    recent_transcript: List[Dict[str, Any]]
+    meeting_context: Optional[Dict[str, Any]] = {}
+    already_suggested_keys: List[str] = []
+
+
+@app.post("/api/proactive-check", summary="Proactive intervention check")
+async def proactive_check_endpoint(req: ProactiveCheckRequest, user: dict = Depends(get_current_user)):
+    """Active モードで Noa が介入すべきか判定する"""
+    try:
+        result = await process_proactive_check(
+            recent_transcript=req.recent_transcript,
+            meeting_context=req.meeting_context or {},
+            already_suggested_keys=req.already_suggested_keys,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Proactive check failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

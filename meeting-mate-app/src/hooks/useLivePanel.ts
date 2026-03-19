@@ -13,6 +13,8 @@ import { filterThinkingText } from "../lib/transcript-filter";
 import { Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
 import { useThinkingQueue } from "../contexts/ThinkingQueueContext";
+import { useProactiveMonitor } from "./useProactiveMonitor";
+import type { ProactiveSuggestion } from "./useProactiveMonitor";
 
 // Firebase
 import { ref, push, set } from "firebase/database";
@@ -51,6 +53,10 @@ export interface UseLivePanelReturn {
 
   // Brain
   isProcessing: boolean;
+
+  // Proactive
+  proactiveSuggestion: ProactiveSuggestion | null;
+  dismissProactiveSuggestion: () => void;
 
   // UI conditions
   canConnect: boolean;
@@ -353,6 +359,15 @@ export function useLivePanel({
     setMode((prev) => (prev === "passive" ? "active" : "passive"));
   }, []);
 
+  // Proactive monitor (Active mode only)
+  const proactive = useProactiveMonitor({
+    enabled: mode === "active" && connected,
+    roomData,
+    roomId,
+    currentSessionId,
+    thinkingQueue: { addTask, updateTask },
+  });
+
   // Derived state for UI
   const canConnect = !connected && !!sharedStream;
   const noStreamWarning = connected && !sharedStream;
@@ -369,6 +384,8 @@ export function useLivePanel({
     startTabAudio,
     stopTabAudio,
     isProcessing,
+    proactiveSuggestion: proactive.currentSuggestion,
+    dismissProactiveSuggestion: proactive.dismissSuggestion,
     canConnect,
     noStreamWarning,
     isSpeaking,

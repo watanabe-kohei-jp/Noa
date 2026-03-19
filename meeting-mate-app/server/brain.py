@@ -135,6 +135,36 @@ JSON のみ返してください:
 {{ "follow_up": "needed", "tool": "ツール名", "args": {{ ... }} }}"""
 
 
+PROACTIVE_ANALYSIS_PROMPT = """あなたは会議AIアシスタント「Noa」のプロアクティブモニターです。
+直近の会議の会話を分析し、Noaが自発的に介入すべき状況かどうかを判定してください。
+
+## 介入すべき状況
+- 事実の主張が検証可能な場合（「売上は10%増えたよね？」→ データ確認を提案）
+- 関連する社内データが存在する可能性がある場合
+- 意思決定の場面で、データに基づく情報提供ができる場合
+- リスクや見落としがある場合
+- 議論が長くなり、要約が有用な場合
+
+## 介入すべきでない状況
+- 雑談、挨拶、軽い冗談
+- 既に十分な情報が共有されている議論
+- 直前に同じトピックで介入済み
+- 会話の自然な流れを妨げる場合
+
+## 既に提案済みのキー（重複回避）
+{already_suggested_keys}
+
+## 直近の会話（人間の発言のみ）
+{transcript}
+
+## 会議コンテキスト
+{context}
+
+## 回答形式
+JSON のみ返してください:
+{{ "intervene": true/false, "suggestion": "提案テキスト（200文字以内）", "dedupe_key": "action_type_正規化トピック", "confidence": 0.0-1.0, "action_type": "fact_check|data_available|decision_support|risk_alert|summary_offer", "reason": "判定理由（デバッグ用）" }}"""
+
+
 # ================================================================
 # Safe Expression Evaluator (AST-based)
 # ================================================================
@@ -834,3 +864,48 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
             "total_elapsed_ms": round((t_end - t0) * 1000),
         },
     }
+
+
+# ================================================================
+# Proactive Check
+# ================================================================
+
+async def process_proactive_check(
+    recent_transcript: list[dict],
+    meeting_context: dict,
+    already_suggested_keys: list[str],
+) -> dict:
+    """Proactive 介入判定: transcript を分析し、Noa が介入すべきか判定する"""
+
+    if not recent_transcript:
+        return {"intervene": False, "reason": "transcript is empty"}
+
+    provider = detect_provider(BRAIN_LLM_MODEL)
+    api_key = get_default_api_key(provider) or DEFAULT_GEMINI_API_KEY
+
+    transcript_text = "\n".join(
+        f"{t.get('speaker', '?')}: {t.get('text', '')}"
+        for t in recent_transcript[-20:]
+    )
+    context_summary = _build_context_summary(meeting_context)
+
+    try:
+        raw = await llm_complete(
+            model=BRAIN_LLM_MODEL,
+            prompt=PROACTIVE_ANALYSIS_PROMPT.format(
+                already_suggested_keys=", ".join(already_suggested_keys) if already_suggested_keys else "(なし)",
+                transcript=transcript_text,
+                context=context_summary,
+            ),
+            api_key=api_key,
+            temperature=0.2,
+            max_tokens=500,
+        )
+        result_json = strip_code_blocks(raw)
+        result = json.loads(result_json)
+        logger.info(f"[Brain] Proactive check: intervene={result.get('intervene')}, "
+                     f"confidence={result.get('confidence')}, key={result.get('dedupe_key')}")
+        return result
+    except (json.JSONDecodeError, Exception) as e:
+        logger.warning(f"[Brain] Proactive check failed: {e}")
+        return {"intervene": False, "reason": f"analysis failed: {e}"}

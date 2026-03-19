@@ -16,6 +16,7 @@ import { LiveAPIProvider } from "../../contexts/LiveAPIContext";
 import type { SessionData } from "../../types/data";
 import { ThinkingQueueProvider } from "../../contexts/ThinkingQueueContext";
 import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
+import ProactiveSuggestionBanner from "./ProactiveSuggestionBanner";
 import { useLivePanel } from "../../hooks/useLivePanel";
 import { authFetch } from "../../lib/api-client";
 
@@ -48,6 +49,8 @@ function LivePanelInner({
     startTabAudio,
     stopTabAudio,
     isProcessing,
+    proactiveSuggestion,
+    dismissProactiveSuggestion,
     canConnect,
     noStreamWarning,
     isSpeaking,
@@ -67,6 +70,12 @@ function LivePanelInner({
     <div className="relative flex items-center gap-2">
       {/* ThinkingQueue overlay */}
       <ThinkingQueuePanel />
+
+      {/* Proactive suggestion banner */}
+      <ProactiveSuggestionBanner
+        suggestion={proactiveSuggestion}
+        onDismiss={dismissProactiveSuggestion}
+      />
 
       {/* Hidden elements for tab capture */}
       <video ref={videoRef} className="hidden" playsInline />
