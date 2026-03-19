@@ -11,6 +11,9 @@ import {
   Sparkles,
   Loader2,
 } from "lucide-react";
+import ImageAttachmentButton from "./ImageAttachmentButton";
+import ImagePreviewOverlay from "./ImagePreviewOverlay";
+import { resizeImageToBase64 } from "../../lib/image-utils";
 import { LiveAPIProvider, useLiveAPIContext } from "../../contexts/LiveAPIContext";
 import { AudioRecorder } from "../../lib/audio-recorder";
 import { LiveToolHandler, MeetingContextProvider } from "../../lib/live-tools/tool-handler";
@@ -122,6 +125,77 @@ function LivePanelInner({
     client.send({ text }, true);
     console.log("[LivePanel] sendText:", text.slice(0, 50));
   }, [client, connected]);
+
+  // sendImage: 画像を Live AI に送信する (sendRealtimeInput 経由)
+  const sendImage = useCallback((base64: string, mimeType: string) => {
+    if (!connected) {
+      console.warn("[LivePanel] sendImage: not connected");
+      return;
+    }
+    client.sendRealtimeInput([{ mimeType, data: base64 }]);
+    console.log("[LivePanel] sendImage: sent", mimeType, `${Math.round(base64.length / 1024)}KB`);
+  }, [connected, client]);
+
+  // Image attachment state
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [imagePreviewStatus, setImagePreviewStatus] = useState<"pending" | "sent" | "error">("pending");
+  const [imageErrorMessage, setImageErrorMessage] = useState<string>("");
+  const pendingImageRef = useRef<{ base64: string; mimeType: string } | null>(null);
+
+  const handleImageReady = useCallback((base64: string, mimeType: string) => {
+    pendingImageRef.current = { base64, mimeType };
+  }, []);
+
+  const handleImagePreview = useCallback((previewUrl: string) => {
+    setImagePreviewUrl(previewUrl);
+    setImagePreviewStatus("pending");
+    setImageErrorMessage("");
+  }, []);
+
+  const handleImageError = useCallback((message: string) => {
+    setImagePreviewUrl(null);
+    setImagePreviewStatus("error");
+    setImageErrorMessage(message);
+    pendingImageRef.current = null;
+  }, []);
+
+  const handleImageSend = useCallback(() => {
+    const pending = pendingImageRef.current;
+    if (!pending) return;
+    sendImage(pending.base64, pending.mimeType);
+    setImagePreviewStatus("sent");
+    pendingImageRef.current = null;
+  }, [sendImage]);
+
+  const handleImageCancel = useCallback(() => {
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    setImagePreviewUrl(null);
+    setImagePreviewStatus("pending");
+    setImageErrorMessage("");
+    pendingImageRef.current = null;
+  }, [imagePreviewUrl]);
+
+  // Clipboard paste handler for images
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    if (!connected) return;
+    const items = e.clipboardData.items;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) return;
+        try {
+          const previewUrl = URL.createObjectURL(file);
+          handleImagePreview(previewUrl);
+          const { base64, mimeType } = await resizeImageToBase64(file);
+          handleImageReady(base64, mimeType);
+        } catch (err) {
+          handleImageError(err instanceof Error ? err.message : "画像の処理に失敗しました。");
+        }
+        return;
+      }
+    }
+  }, [connected, handleImagePreview, handleImageReady, handleImageError]);
 
   // onReady で sendText API を公開
   useEffect(() => {
@@ -293,6 +367,75 @@ function LivePanelInner({
     };
   }, [connected, client, sharedStream, audioRecorder]);
 
+  // Vision snapshot: クライアント側差分検出 + バックエンド送信
+  const lastSnapshotPixelsRef = useRef<Uint8Array | null>(null);
+  const lastSnapshotTimeRef = useRef<number>(0);
+  const VISION_MIN_INTERVAL = 30_000; // 30秒間隔
+  const VISION_DIFF_THRESHOLD = 0.15; // 15% 以上の変化で送信
+
+  const computeAndSendVisionSnapshot = useCallback(
+    (sourceCanvas: HTMLCanvasElement) => {
+      const now = Date.now();
+      if (now - lastSnapshotTimeRef.current < VISION_MIN_INTERVAL) return;
+      if (!roomId) return;
+
+      // 32x32 グレースケールで差分検出
+      const small = document.createElement("canvas");
+      small.width = 32;
+      small.height = 32;
+      const sCtx = small.getContext("2d");
+      if (!sCtx) return;
+      sCtx.drawImage(sourceCanvas, 0, 0, 32, 32);
+      const imgData = sCtx.getImageData(0, 0, 32, 32);
+      const pixels = new Uint8Array(32 * 32);
+      for (let i = 0; i < pixels.length; i++) {
+        const r = imgData.data[i * 4];
+        const g = imgData.data[i * 4 + 1];
+        const b = imgData.data[i * 4 + 2];
+        pixels[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+      }
+
+      if (lastSnapshotPixelsRef.current) {
+        let diffCount = 0;
+        for (let i = 0; i < pixels.length; i++) {
+          if (Math.abs(pixels[i] - lastSnapshotPixelsRef.current[i]) > 20) {
+            diffCount++;
+          }
+        }
+        const diffRatio = diffCount / pixels.length;
+        if (diffRatio < VISION_DIFF_THRESHOLD) return; // 変化なし → skip
+      }
+
+      lastSnapshotPixelsRef.current = pixels;
+      lastSnapshotTimeRef.current = now;
+
+      // 分析用に少し高解像度でキャプチャ (50%, 60% quality)
+      const analysisCanvas = document.createElement("canvas");
+      analysisCanvas.width = sourceCanvas.width * 2; // 25% → 50%
+      analysisCanvas.height = sourceCanvas.height * 2;
+      const aCtx = analysisCanvas.getContext("2d");
+      if (!aCtx) return;
+      // sourceCanvas の元の video から描画
+      const videoEl = videoRef.current;
+      if (!videoEl) return;
+      aCtx.drawImage(videoEl, 0, 0, analysisCanvas.width, analysisCanvas.height);
+      const b64 = analysisCanvas.toDataURL("image/jpeg", 0.6);
+      const data = b64.slice(b64.indexOf(",") + 1);
+
+      authFetch("/api/vision/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomId,
+          sessionId: currentSessionId,
+          imageBase64: data,
+          timestamp: new Date().toISOString(),
+        }),
+      }).catch((err) => console.warn("[LivePanel] Vision snapshot failed:", err));
+    },
+    [roomId, currentSessionId]
+  );
+
   // Tab audio capture
   const stopTabAudio = useCallback(() => {
     tabStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -362,6 +505,9 @@ function LivePanelInner({
           const data = base64.slice(base64.indexOf(",") + 1);
           client.sendRealtimeInput([{ mimeType: "image/jpeg", data }]);
 
+          // Vision 分析: 差分検出 + バックエンド送信
+          computeAndSendVisionSnapshot(canvas);
+
           setTimeout(sendFrame, 2000); // 0.5 FPS
         };
         sendFrame();
@@ -384,7 +530,16 @@ function LivePanelInner({
     `${Math.min(vol * 300, 100)}%`;
 
   return (
-    <div className="relative flex items-center gap-2">
+    <div className="relative flex items-center gap-2" onPaste={handlePaste}>
+      {/* Image preview overlay */}
+      <ImagePreviewOverlay
+        previewUrl={imagePreviewUrl}
+        status={imagePreviewStatus}
+        errorMessage={imageErrorMessage}
+        onSend={handleImageSend}
+        onCancel={handleImageCancel}
+      />
+
       {/* ThinkingQueue overlay */}
       <ThinkingQueuePanel />
 
@@ -455,6 +610,16 @@ function LivePanelInner({
         >
           {tabAudioActive ? <MonitorOff size={16} /> : <MonitorUp size={16} />}
         </button>
+      )}
+
+      {/* Image attachment */}
+      {connected && (
+        <ImageAttachmentButton
+          onImageReady={handleImageReady}
+          onPreview={handleImagePreview}
+          onError={handleImageError}
+          disabled={!connected}
+        />
       )}
 
       {/* Brain processing indicator */}
