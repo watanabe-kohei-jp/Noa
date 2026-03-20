@@ -29,7 +29,7 @@ jobs:
         working-directory: meeting-mate-app
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -60,7 +60,7 @@ jobs:
         working-directory: meeting-mate-app/server
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
