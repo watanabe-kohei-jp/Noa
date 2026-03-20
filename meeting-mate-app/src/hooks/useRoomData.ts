@@ -193,6 +193,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
         startTime: t.startTime,
         endTime: t.endTime,
         source: t.source,
+        origin: t.origin,
       }));
     } else if (rawTranscript && typeof rawTranscript === 'object') {
       newTranscript = Object.entries(rawTranscript as Record<string, TranscriptEntry>).map(([pushId, t]) => ({
@@ -208,6 +209,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
         startTime: t.startTime,
         endTime: t.endTime,
         source: t.source,
+        origin: t.origin,
       }));
       newTranscript.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     }
@@ -303,6 +305,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
           startTime: t.startTime,
           endTime: t.endTime,
           source: t.source,
+          origin: t.origin,
         }));
         newTranscript.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
       }

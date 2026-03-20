@@ -3,12 +3,12 @@ from __future__ import annotations
 
 # マルチプロバイダー LLM 設定
 from config import (
-    DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT,
+    DEFAULT_LLM_MODEL, LLM_TRIGGER_MESSAGE_COUNT, LLM_TRANSCRIPT_LIMIT,
     AGENT_CONFIG_DIR, DEFAULT_GEMINI_API_KEY, get_default_api_key
 )
 from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
-from brain import process_brain_request
+from brain import process_brain_request, process_proactive_check
 from vision_analyzer import analyze_vision
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import logging
+import time
 from datetime import datetime, timedelta
 from api_key_manager import FirebaseAPIKeyManager
 from auth import get_current_user
@@ -276,6 +277,54 @@ async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_use
 
 
 # ================================================================
+# Endpoints: Proactive Check (Active mode intervention)
+# ================================================================
+
+class ProactiveCheckRequest(BaseModel):
+    room_id: str
+    session_id: Optional[str] = None
+    recent_transcript: List[Dict[str, Any]]
+    meeting_context: Optional[Dict[str, Any]] = {}
+    already_suggested_keys: List[str] = []
+
+
+# Room 単位の簡易 rate limit（30秒ガード）
+_proactive_last_check: Dict[str, float] = {}
+_PROACTIVE_MIN_INTERVAL_S = 30.0
+
+
+@app.post("/api/proactive-check", summary="Proactive intervention check")
+async def proactive_check_endpoint(req: ProactiveCheckRequest, user: dict = Depends(get_current_user)):
+    """Active モードで Noa が介入すべきか判定する"""
+    uid = user["uid"]
+
+    # Room membership チェック
+    room_data = db.reference(f"rooms/{req.room_id}").get()
+    if not room_data or not room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
+    # Room 単位の rate limit（30秒以内の再リクエストは即返却）
+    now = time.time()
+    last = _proactive_last_check.get(req.room_id, 0.0)
+    if now - last < _PROACTIVE_MIN_INTERVAL_S:
+        return {"intervene": False, "reason": "rate limited"}
+    _proactive_last_check[req.room_id] = now
+
+    try:
+        # Payload 上限: transcript は最大20件
+        transcript = req.recent_transcript[-20:] if req.recent_transcript else []
+        result = await process_proactive_check(
+            recent_transcript=transcript,
+            meeting_context=req.meeting_context or {},
+            already_suggested_keys=req.already_suggested_keys,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Proactive check failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
 # Endpoints: Vision Analysis
 # ================================================================
 
@@ -373,6 +422,14 @@ async def _trigger_agents_from_vision(room_id: str, session_id: Optional[str]):
             else:
                 db_transcript_entries = []
 
+            # transcript を直近 N 件にスライス + room-level データを軽量取得
+            recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
+            room_ref = db.reference(f"rooms/{room_id}")
+            room_data = {
+                "participants": room_ref.child("participants").get() or {},
+                "representativeMode": room_ref.child("representativeMode").get() or False,
+            }
+
             # 最小限の TaskPayload を構築
             task_payload = TaskPayload(
                 taskId=f"vision-{datetime.utcnow().isoformat()}",
@@ -390,7 +447,8 @@ async def _trigger_agents_from_vision(room_id: str, session_id: Optional[str]):
             from fastapi import BackgroundTasks as BT
             dummy_bg = BT()
             await orchestrate_agents(
-                task_payload, dummy_bg, db_transcript_entries, None
+                task_payload, dummy_bg, recent_entries, None,
+                session_data=session_data, room_data=room_data
             )
         finally:
             session_ref.child("is_llm_processing").set(False)
@@ -590,17 +648,17 @@ async def process_single_agent(
         if hasattr(agent, 'execute'):
             room_ref_path = f"rooms/{task_payload.roomId}"
             session_data_path = get_session_data_path(task_payload.roomId, task_payload.sessionId)
-            room_data_snapshot = db.reference(room_ref_path).get() or {}
-            session_data_snapshot = db.reference(session_data_path).get() or {} if task_payload.sessionId else room_data_snapshot
+            # participants のみ room-level から個別取得（room 全体の再取得を廃止）
+            participants = db.reference(f"{room_ref_path}/participants").get() or {}
+            session_data_snapshot = db.reference(session_data_path).get() or {} if task_payload.sessionId else {}
             current_data_for_agent = {
-                "participants": room_data_snapshot.get("participants"),
+                "participants": participants,
                 "tasks": session_data_snapshot.get("tasks"),
                 "notes": session_data_snapshot.get("notes"),
                 "agenda": session_data_snapshot.get("currentAgenda"),
                 "overviewDiagram": session_data_snapshot.get("overviewDiagram"),
                 "suggestedNextTopics": session_data_snapshot.get("suggestedNextTopics"),
                 "visionContext": session_data_snapshot.get("visionContext"),
-                "full_room_data": room_data_snapshot
             }
             task_payload.currentParticipants = current_data_for_agent["participants"]
             task_payload.currentTasks = current_data_for_agent["tasks"]
@@ -643,7 +701,7 @@ async def process_single_agent(
         results_dict[agent_name] = {"error": str(e)}
 
 
-async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None):
+async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None, session_data: Optional[Dict[str, Any]] = None, room_data: Optional[Dict[str, Any]] = None):
     logger.info(
         f"Orchestrating agents for task: {task_payload.taskId}, room: {task_payload.roomId}")
 
@@ -694,7 +752,11 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             llm_transcript_messages.append(LLMMessage(
                 role="user", parts=[{"text": "[変換エラー]"}]))
 
-    session_data_for_llm_context = db.reference(room_ref_path).get() or {}
+    # session_data + room_data を合成（room 全体の再取得を廃止）
+    session_data_for_llm_context = dict(session_data) if session_data else {}
+    if room_data:
+        session_data_for_llm_context["participants"] = room_data.get("participants", {})
+        session_data_for_llm_context["representativeMode"] = room_data.get("representativeMode", False)
     session_data_for_llm_context['transcript'] = [
         msg.model_dump() for msg in llm_transcript_messages]
     session_data_json_str = json.dumps(
@@ -887,14 +949,13 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         except Exception as e:
             logger.error(f"Error updating transcript: {e}", exc_info=True)
 
-    # セッションデータとルームデータの最新を取得
+    # セッションデータと participants の最新を取得（room 全体の再取得を廃止）
     session_data_after = db.reference(session_data_path).get() or {}
-    room_data_after_scheduling = db.reference(room_ref_path).get() or {}
+    participants_after = db.reference(f"{room_ref_path}/participants").get() or {}
 
     final_result = AgentResult(
         invokedAgents=active_agent_names,
-        updatedParticipants=list(room_data_after_scheduling.get("participants", {}).values(
-        )) if room_data_after_scheduling.get("participants") else None,
+        updatedParticipants=list(participants_after.values()) if participants_after else None,
         updatedTasks=list(session_data_after.get(
             "tasks", {}).values()) if session_data_after.get("tasks") else None,
         updatedNotes=list(session_data_after.get(
@@ -1031,9 +1092,20 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
         if not should_trigger:
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
 
+        # transcript を直近 N 件にスライスして LLM に渡す
+        recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
+
+        # room-level データは transcript を含まない軽量取得
+        room_ref = db.reference(f"rooms/{room_id}")
+        room_data = {
+            "participants": room_ref.child("participants").get() or {},
+            "representativeMode": room_ref.child("representativeMode").get() or False,
+        }
+
         try:
             agent_processing_result = await orchestrate_agents(
-                task_payload, background_tasks, db_transcript_entries, task_payload.llmApiKey)
+                task_payload, background_tasks, recent_entries,
+                task_payload.llmApiKey, session_data=session_data, room_data=room_data)
             session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
             return JsonRpcResponse(result=agent_processing_result, id=request.id)
         except Exception as e:
