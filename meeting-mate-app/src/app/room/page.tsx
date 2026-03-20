@@ -948,7 +948,7 @@ export default function RoomPage() {
       </header>
 
       {/* Main Content */}
-      <main className="py-6 px-4 sm:px-6 max-w-full">
+      <main className="pt-6 pb-24 px-4 sm:px-6 max-w-full">
         {screenSize === 'small' ? renderMobile() : renderDesktop()}
       </main>
 
