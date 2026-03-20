@@ -632,7 +632,6 @@ async def process_brain_request(request: str, meeting_context: dict) -> dict:
 
         logger.info(f"[Brain] Follow-up #{follow_up_idx + 1}: {fu_tool} (reason: {fu_decision.get('reason', '')})")
 
-        t_fu_exec_start = time.perf_counter()
         fu_result = await execute_tool(fu_tool, fu_args, meeting_context)
         t_fu_exec_end = time.perf_counter()
 

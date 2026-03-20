@@ -8,7 +8,7 @@ SERVER_DIR = os.path.dirname(os.path.dirname(__file__))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
-from brain import process_proactive_check
+from brain import process_proactive_check  # noqa: E402
 
 
 class ProcessProactiveCheckTests(unittest.IsolatedAsyncioTestCase):

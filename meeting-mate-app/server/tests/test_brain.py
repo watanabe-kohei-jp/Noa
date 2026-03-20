@@ -7,7 +7,7 @@ SERVER_DIR = os.path.dirname(os.path.dirname(__file__))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
-from brain import extract_actions
+from brain import extract_actions  # noqa: E402
 
 
 class ExtractActionsTests(unittest.TestCase):
