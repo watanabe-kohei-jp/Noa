@@ -31,7 +31,16 @@ class ValidateAndCleanMermaidTests(unittest.TestCase):
 
     def test_rejects_non_graph_td_or_lr(self):
         self.assertIsNone(validate_and_clean_mermaid("sequenceDiagram\nA->>B: hi"))
-        self.assertIsNone(validate_and_clean_mermaid("flowchart TD\nA-->B"))
+
+    def test_normalizes_flowchart_to_graph(self):
+        self.assertEqual(
+            validate_and_clean_mermaid("flowchart TD\n    A-->B"),
+            "graph TD\n    A-->B",
+        )
+        self.assertEqual(
+            validate_and_clean_mermaid("flowchart LR\n    A-->B"),
+            "graph LR\n    A-->B",
+        )
 
     def test_removes_dangerous_directives(self):
         raw = "\n".join(

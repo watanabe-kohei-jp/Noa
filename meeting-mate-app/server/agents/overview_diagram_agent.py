@@ -166,19 +166,45 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
 
 今回対応すべき新しい指示: {instruction}
 
-更新された概要図のMermaid.js定義 (JSONオブジェクト):"""
+更新された概要図のMermaid.js定義 (raw Mermaidコードのみ):"""
+
+        retry_extra = (
+            "\n\n**CRITICAL (previous generation had format errors): "
+            "Start with `graph TD` or `graph LR`. "
+            "Do NOT use flowchart, sequenceDiagram, or any other type. "
+            "Do NOT wrap in code blocks. Output raw Mermaid code ONLY.**"
+        )
+
+        attempts = [
+            (None, ""),
+            (None, retry_extra),
+        ]
 
         logger.info(
             f"Sending overview diagram prompt to LLM. Instruction: {instruction}")
-        llm_response_text = await llm_complete(model=model_name, prompt=prompt, api_key=api_key)
 
-        logger.info(f"LLM overview diagram response: {llm_response_text}")
+        new_mermaid_definition = None
+        for attempt_idx, (_temp, extra) in enumerate(attempts):
+            try:
+                llm_response_text = await llm_complete(
+                    model=model_name, prompt=prompt + extra, api_key=api_key)
 
-        if not llm_response_text:
-            return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM returned empty overview diagram update."
+                logger.info(f"LLM overview diagram response (attempt {attempt_idx + 1}): {llm_response_text}")
 
-        # 共通バリデーション + サニタイズ
-        new_mermaid_definition = validate_and_clean_mermaid(llm_response_text)
+                if not llm_response_text:
+                    logger.warning(f"[OverviewDiagram] Empty response (attempt {attempt_idx + 1}/{len(attempts)})")
+                    continue
+
+                new_mermaid_definition = validate_and_clean_mermaid(llm_response_text)
+                if new_mermaid_definition:
+                    if attempt_idx > 0:
+                        logger.info(f"[OverviewDiagram] Succeeded on retry (attempt {attempt_idx + 1})")
+                    break
+                logger.warning(f"[OverviewDiagram] Validation failed (attempt {attempt_idx + 1}/{len(attempts)})")
+            except Exception as e:
+                logger.error(f"[OverviewDiagram] LLM call failed (attempt {attempt_idx + 1}): {e}")
+                break
+
         if not new_mermaid_definition:
             logger.error("LLM response failed Mermaid validation, using existing definition")
             return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM response was not in the expected Mermaid format."
