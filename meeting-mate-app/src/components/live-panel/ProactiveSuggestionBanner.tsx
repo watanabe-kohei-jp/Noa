@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { AlertTriangle, Database, Scale, FileText, X } from "lucide-react";
+import { AlertTriangle, Database, Scale, FileText, X, Play } from "lucide-react";
 import type { ProactiveSuggestion } from "../../hooks/useProactiveMonitor";
 
 const ACTION_ICONS: Record<string, React.ElementType> = {
@@ -15,11 +15,13 @@ const ACTION_ICONS: Record<string, React.ElementType> = {
 interface ProactiveSuggestionBannerProps {
   suggestion: ProactiveSuggestion | null;
   onDismiss: () => void;
+  onAction?: (suggestion: ProactiveSuggestion) => void;
 }
 
 export default function ProactiveSuggestionBanner({
   suggestion,
   onDismiss,
+  onAction,
 }: ProactiveSuggestionBannerProps) {
   if (!suggestion) return null;
 
@@ -32,6 +34,16 @@ export default function ProactiveSuggestionBanner({
         <span className="flex-1 text-xs leading-relaxed">
           {suggestion.suggestion}
         </span>
+        {onAction && (
+          <button
+            onClick={() => onAction(suggestion)}
+            className="flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-medium bg-amber-700/60 hover:bg-amber-600/70 transition-colors flex items-center gap-1"
+            title="確認する"
+          >
+            <Play size={10} />
+            確認
+          </button>
+        )}
         <button
           onClick={onDismiss}
           className="flex-shrink-0 rounded p-0.5 hover:bg-amber-800/50 transition-colors"

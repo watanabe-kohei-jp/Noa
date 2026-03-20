@@ -14,6 +14,8 @@ const CHECK_INTERVAL_MS = 45_000;
 const COOLDOWN_AFTER_SUGGESTION_MS = 90_000;
 const MIN_NEW_HUMAN_ENTRIES = 2;
 const CONFIDENCE_THRESHOLD = 0.7;
+const AUTO_INTERVENE_CONFIDENCE = 0.9;
+const AUTO_INTERVENE_MIN_INTERVAL_MS = 60_000;
 const DEDUPE_EXPIRE_MS = 10 * 60_000;
 const AUTO_DISMISS_MS = 30_000;
 const THINKING_QUEUE_DELAY_MS = 700;
@@ -32,6 +34,8 @@ export interface ProactiveSuggestion {
 
 interface UseProactiveMonitorProps {
   enabled: boolean;
+  autoInterveneEnabled?: boolean;
+  onAutoIntervene?: (suggestion: ProactiveSuggestion) => void;
   roomData: SessionData | null;
   roomId: string | null;
   currentSessionId: string | null;
@@ -64,6 +68,8 @@ function buildClientDedupeKey(
 
 export function useProactiveMonitor({
   enabled,
+  autoInterveneEnabled = false,
+  onAutoIntervene,
   roomData,
   roomId,
   currentSessionId,
@@ -77,13 +83,22 @@ export function useProactiveMonitor({
   const lastProcessedIdRef = useRef<string | null>(null);
   const suggestedKeysRef = useRef<Map<string, number>>(new Map());
   const lastSuggestionTimeRef = useRef(0);
+  const lastAutoInterveneTimeRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const autoInterveneEnabledRef = useRef(autoInterveneEnabled);
+  const onAutoInterveneRef = useRef(onAutoIntervene);
   const thinkingQueueRef = useRef(thinkingQueue);
   const roomDataRef = useRef(roomData);
   const roomIdRef = useRef(roomId);
   const sessionIdRef = useRef(currentSessionId);
 
   // Keep refs in sync
+  useEffect(() => {
+    autoInterveneEnabledRef.current = autoInterveneEnabled;
+  }, [autoInterveneEnabled]);
+  useEffect(() => {
+    onAutoInterveneRef.current = onAutoIntervene;
+  }, [onAutoIntervene]);
   useEffect(() => {
     thinkingQueueRef.current = thinkingQueue;
   }, [thinkingQueue]);
@@ -222,8 +237,22 @@ export function useProactiveMonitor({
             timestamp: Date.now(),
           };
 
-          setCurrentSuggestion(suggestion);
-          lastSuggestionTimeRef.current = Date.now();
+          // 高信頼度自動介入: confidence >= 0.9 + 設定 ON + 頻度制限クリア
+          const checkNow = Date.now();
+          if (
+            data.confidence >= AUTO_INTERVENE_CONFIDENCE &&
+            autoInterveneEnabledRef.current &&
+            onAutoInterveneRef.current &&
+            checkNow - lastAutoInterveneTimeRef.current >= AUTO_INTERVENE_MIN_INTERVAL_MS
+          ) {
+            lastAutoInterveneTimeRef.current = checkNow;
+            lastSuggestionTimeRef.current = checkNow;
+            onAutoInterveneRef.current(suggestion);
+          } else {
+            // 通常バナー表示（自動介入無効、頻度制限中、or confidence 0.7-0.9）
+            setCurrentSuggestion(suggestion);
+            lastSuggestionTimeRef.current = Date.now();
+          }
         }
       }
     } catch (err) {
@@ -246,6 +275,12 @@ export function useProactiveMonitor({
   const dismissSuggestion = useCallback(() => {
     setCurrentSuggestion(null);
     lastSuggestionTimeRef.current = Date.now(); // trigger cooldown
+  }, []);
+
+  // Accept handler (user tapped "確認する" → dismiss + cooldown)
+  const acceptSuggestion = useCallback(() => {
+    setCurrentSuggestion(null);
+    lastSuggestionTimeRef.current = Date.now();
   }, []);
 
   // Auto-dismiss timer
@@ -282,5 +317,5 @@ export function useProactiveMonitor({
     };
   }, [enabled, performCheck]);
 
-  return { currentSuggestion, dismissSuggestion };
+  return { currentSuggestion, dismissSuggestion, acceptSuggestion };
 }

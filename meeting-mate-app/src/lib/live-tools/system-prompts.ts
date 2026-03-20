@@ -126,7 +126,10 @@ const ACTIVE_PROMPT = `${BASE_PROMPT}
   * 各選択肢のメリット・デメリットをデータで示す
   * ただし最終判断は人間に委ねる
 - 発言の頻度は適切に保つ（最小30秒間隔、話しすぎない）
-- 「補足ですが」「一点確認ですが」などの導入で自然に割り込む`;
+- 「補足ですが」「一点確認ですが」などの導入で自然に割り込む
+- 「【プロアクティブ】」で始まるメッセージは、会議分析システムからの自動介入リクエストです
+  * delegate_to_brain を呼び出して正確なデータを取得し、結果を報告してください
+  * 「補足ですが」「確認してみました」など自然な導入で発言してください`;
 
 export function getSystemPrompt(mode: LiveMode): string {
   return mode === "active" ? ACTIVE_PROMPT : PASSIVE_PROMPT;
