@@ -35,6 +35,16 @@ import asyncio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# セッション単位の LLM 処理排他ロック (単一 uvicorn ワーカー前提)
+_llm_processing_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_processing_lock(session_data_path: str) -> asyncio.Lock:
+    """セッションパスに対応する asyncio.Lock を取得（なければ作成）"""
+    if session_data_path not in _llm_processing_locks:
+        _llm_processing_locks[session_data_path] = asyncio.Lock()
+    return _llm_processing_locks[session_data_path]
+
 load_dotenv()
 
 # --- クレデンシャルパス解決ヘルパー ---
@@ -388,41 +398,51 @@ async def _trigger_agents_from_vision(room_id: str, session_id: Optional[str]):
     try:
         session_data_path = get_session_data_path(room_id, session_id)
         session_ref = db.reference(session_data_path)
-        session_data = session_ref.get() or {}
 
-        # is_llm_processing ガード
-        if session_data.get("is_llm_processing", False):
-            logger.info(f"[Vision→Agent] {room_id}: LLM already processing, skip.")
+        # --- trylock: ロックが取れなければ即 skip（待ち行列化を防ぐ）---
+        lock = _get_processing_lock(session_data_path)
+        if lock.locked():
+            logger.info(f"[Vision→Agent] {room_id}: Lock held, skip.")
             return
 
-        # transcript を読み込み
-        raw_transcript = session_data.get("transcript", {})
-        if isinstance(raw_transcript, dict):
-            db_transcript_entries = list(raw_transcript.values())
-        elif isinstance(raw_transcript, list):
-            db_transcript_entries = raw_transcript
-        else:
-            db_transcript_entries = []
+        async with lock:
+            session_data = session_ref.get() or {}
 
-        # 最小限の TaskPayload を構築
-        task_payload = TaskPayload(
-            taskId=f"vision-{datetime.utcnow().isoformat()}",
-            messages=[],
-            roomId=room_id,
-            sessionId=session_id,
-            speakerId="vision-system",
-            speakerName="Vision System",
-        )
+            # is_llm_processing ガード
+            if session_data.get("is_llm_processing", False):
+                logger.info(f"[Vision→Agent] {room_id}: LLM already processing, skip.")
+                return
 
-        # transcript を直近 N 件にスライス + room-level データを軽量取得
-        recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
-        room_ref = db.reference(f"rooms/{room_id}")
-        room_data = {
-            "participants": room_ref.child("participants").get() or {},
-            "representativeMode": room_ref.child("representativeMode").get() or False,
-        }
+            # transcript を読み込み
+            raw_transcript = session_data.get("transcript", {})
+            if isinstance(raw_transcript, dict):
+                db_transcript_entries = list(raw_transcript.values())
+            elif isinstance(raw_transcript, list):
+                db_transcript_entries = raw_transcript
+            else:
+                db_transcript_entries = []
 
-        session_ref.child("is_llm_processing").set(True)
+            # transcript を直近 N 件にスライス + room-level データを軽量取得
+            recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
+            room_ref = db.reference(f"rooms/{room_id}")
+            room_data = {
+                "participants": room_ref.child("participants").get() or {},
+                "representativeMode": room_ref.child("representativeMode").get() or False,
+            }
+
+            # 最小限の TaskPayload を構築
+            task_payload = TaskPayload(
+                taskId=f"vision-{datetime.utcnow().isoformat()}",
+                messages=[],
+                roomId=room_id,
+                sessionId=session_id,
+                speakerId="vision-system",
+                speakerName="Vision System",
+            )
+
+            session_ref.child("is_llm_processing").set(True)
+
+        # --- ロック外で LLM 処理実行 ---
         try:
             from fastapi import BackgroundTasks as BT
             dummy_bg = BT()
@@ -1012,83 +1032,87 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
             logger.info(f"[{room_id}] Demo room message. Skipping AI processing.")
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
 
-        session_data = session_ref.get()
-        if session_data is None:
-            session_data = {}
+        # --- ロックで read→check→set(True) をアトミック化 ---
+        lock = _get_processing_lock(session_data_path)
+        should_trigger = False
+        async with lock:
+            session_data = session_ref.get()
+            if session_data is None:
+                session_data = {}
 
-        # transcript を Object (push-key) / list 両対応で読み込み
-        raw_transcript = session_data.get("transcript", {})
-        if isinstance(raw_transcript, dict):
-            db_transcript_entries = list(raw_transcript.values())
-        elif isinstance(raw_transcript, list):
-            db_transcript_entries = raw_transcript  # 後方互換
-        else:
-            db_transcript_entries = []
+            # transcript を Object (push-key) / list 両対応で読み込み
+            raw_transcript = session_data.get("transcript", {})
+            if isinstance(raw_transcript, dict):
+                db_transcript_entries = list(raw_transcript.values())
+            elif isinstance(raw_transcript, list):
+                db_transcript_entries = raw_transcript  # 後方互換
+            else:
+                db_transcript_entries = []
 
-        # origin allowlist でトリガー対象を判定（ループ防止）
-        TRIGGERABLE_ORIGINS = {"human_chat", "human_stt"}
+            # origin allowlist でトリガー対象を判定（ループ防止）
+            TRIGGERABLE_ORIGINS = {"human_chat", "human_stt"}
 
-        def is_triggerable(entry: dict) -> bool:
-            origin = entry.get("origin")
-            if origin:
-                return origin in TRIGGERABLE_ORIGINS
-            # 後方互換: origin 未設定 → source/role から推定
-            if entry.get("role") == "ai":
-                return False
-            source = entry.get("source")
-            if source in ("stt", "manual"):
-                return True
-            if source == "live-api" and entry.get("role") == "user":
-                return True
-            return entry.get("role") != "ai"
+            def is_triggerable(entry: dict) -> bool:
+                origin = entry.get("origin")
+                if origin:
+                    return origin in TRIGGERABLE_ORIGINS
+                # 後方互換: origin 未設定 → source/role から推定
+                if entry.get("role") == "ai":
+                    return False
+                source = entry.get("source")
+                if source in ("stt", "manual"):
+                    return True
+                if source == "live-api" and entry.get("role") == "user":
+                    return True
+                return entry.get("role") != "ai"
 
-        trigger_messages = [e for e in db_transcript_entries if is_triggerable(e)]
-        current_user_message_count = len(trigger_messages)
+            trigger_messages = [e for e in db_transcript_entries if is_triggerable(e)]
+            current_user_message_count = len(trigger_messages)
 
-        last_processed_count = session_data.get("last_llm_processed_message_count", 0)
-        if last_processed_count > current_user_message_count:
-            last_processed_count = 0
-            session_ref.child("last_llm_processed_message_count").set(0)
-            logger.warning(f"[{room_id}] Reset last_llm_processed_message_count to 0.")
+            last_processed_count = session_data.get("last_llm_processed_message_count", 0)
+            if last_processed_count > current_user_message_count:
+                last_processed_count = 0
+                session_ref.child("last_llm_processed_message_count").set(0)
+                logger.warning(f"[{room_id}] Reset last_llm_processed_message_count to 0.")
 
-        logger.info(
-            f"[{room_id}] Current user messages: {current_user_message_count}, Last processed: {last_processed_count}, Trigger: {LLM_TRIGGER_MESSAGE_COUNT}")
+            logger.info(
+                f"[{room_id}] Current user messages: {current_user_message_count}, Last processed: {last_processed_count}, Trigger: {LLM_TRIGGER_MESSAGE_COUNT}")
 
-        is_processing = session_data.get("is_llm_processing", False)
-        if is_processing:
-            logger.info(f"[{room_id}] LLM processing already in progress. Skipping.")
+            is_processing = session_data.get("is_llm_processing", False)
+            if is_processing:
+                logger.info(f"[{room_id}] LLM processing already in progress. Skipping.")
+                return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
+
+            should_trigger = (current_user_message_count - last_processed_count) >= LLM_TRIGGER_MESSAGE_COUNT
+            if should_trigger:
+                logger.info(f"[{room_id}] Triggering LLM processing.")
+                session_ref.child("is_llm_processing").set(True)
+
+        # --- ロック外で LLM 処理実行 ---
+        if not should_trigger:
             return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
 
-        if (current_user_message_count - last_processed_count) >= LLM_TRIGGER_MESSAGE_COUNT:
-            logger.info(f"[{room_id}] Triggering LLM processing.")
+        # transcript を直近 N 件にスライスして LLM に渡す
+        recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
 
-            session_ref.child("is_llm_processing").set(True)
+        # room-level データは transcript を含まない軽量取得
+        room_ref = db.reference(f"rooms/{room_id}")
+        room_data = {
+            "participants": room_ref.child("participants").get() or {},
+            "representativeMode": room_ref.child("representativeMode").get() or False,
+        }
 
-            try:
-                # transcript を直近 N 件にスライスして LLM に渡す
-                recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
-
-                # room-level データは transcript を含まない軽量取得
-                room_ref = db.reference(f"rooms/{room_id}")
-                room_data = {
-                    "participants": room_ref.child("participants").get() or {},
-                    "representativeMode": room_ref.child("representativeMode").get() or False,
-                }
-
-                agent_processing_result = await orchestrate_agents(
-                    task_payload, background_tasks, recent_entries,
-                    task_payload.llmApiKey, session_data=session_data, room_data=room_data)
-
-                session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
-                session_ref.child("is_llm_processing").set(False)
-
-                return JsonRpcResponse(result=agent_processing_result, id=request.id)
-            except Exception as e:
-                logger.error(f"[{room_id}] Error in orchestrate_agents: {e}", exc_info=True)
-                session_ref.child("is_llm_processing").set(False)
-                return JsonRpcResponse(error={"code": -32000, "message": f"LLM processing error: {str(e)}"}, id=request.id)
-        else:
-            return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
+        try:
+            agent_processing_result = await orchestrate_agents(
+                task_payload, background_tasks, recent_entries,
+                task_payload.llmApiKey, session_data=session_data, room_data=room_data)
+            session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
+            return JsonRpcResponse(result=agent_processing_result, id=request.id)
+        except Exception as e:
+            logger.error(f"[{room_id}] Error in orchestrate_agents: {e}", exc_info=True)
+            return JsonRpcResponse(error={"code": -32000, "message": f"LLM processing error: {str(e)}"}, id=request.id)
+        finally:
+            session_ref.child("is_llm_processing").set(False)
 
     except Exception as e:
         logger.error(f"Error in /invoke: {e}", exc_info=True)
