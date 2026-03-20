@@ -130,11 +130,12 @@ function LivePanelInner({
   const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
 
   // Auto-intervene handler: confidence >= 0.9 → バナーなしで Live AI にテキスト注入
-  const handleAutoIntervene = useCallback((suggestion: { suggestion: string }) => {
-    if (!connected) return;
+  // Returns true if injection succeeded, false to fall back to banner
+  const handleAutoIntervene = useCallback((suggestion: { suggestion: string }): boolean => {
+    if (!connected) return false;
     if (toolHandlerRef.current.hasActiveFunctionCalls()) {
-      console.log("[LivePanel] FC in progress, skipping auto-intervene");
-      return;
+      console.log("[LivePanel] FC in progress, skipping auto-intervene → banner fallback");
+      return false;
     }
     client.send(
       { text: `【プロアクティブ】${suggestion.suggestion}\n確認してみますね。` },
@@ -142,6 +143,7 @@ function LivePanelInner({
     );
     lastProactiveInjectTimeRef.current = Date.now();
     console.log("[LivePanel] Auto-intervene sent:", suggestion.suggestion.slice(0, 50));
+    return true;
   }, [client, connected]);
 
   // Proactive monitor (Active mode only)

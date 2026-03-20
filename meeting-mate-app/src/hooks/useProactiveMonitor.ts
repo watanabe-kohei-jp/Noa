@@ -35,7 +35,8 @@ export interface ProactiveSuggestion {
 interface UseProactiveMonitorProps {
   enabled: boolean;
   autoInterveneEnabled?: boolean;
-  onAutoIntervene?: (suggestion: ProactiveSuggestion) => void;
+  /** Return true if injection succeeded, false to fall back to banner */
+  onAutoIntervene?: (suggestion: ProactiveSuggestion) => boolean;
   roomData: SessionData | null;
   roomId: string | null;
   currentSessionId: string | null;
@@ -239,17 +240,21 @@ export function useProactiveMonitor({
 
           // 高信頼度自動介入: confidence >= 0.9 + 設定 ON + 頻度制限クリア
           const checkNow = Date.now();
+          let autoIntervened = false;
           if (
             data.confidence >= AUTO_INTERVENE_CONFIDENCE &&
             autoInterveneEnabledRef.current &&
             onAutoInterveneRef.current &&
             checkNow - lastAutoInterveneTimeRef.current >= AUTO_INTERVENE_MIN_INTERVAL_MS
           ) {
-            lastAutoInterveneTimeRef.current = checkNow;
-            lastSuggestionTimeRef.current = checkNow;
-            onAutoInterveneRef.current(suggestion);
-          } else {
-            // 通常バナー表示（自動介入無効、頻度制限中、or confidence 0.7-0.9）
+            autoIntervened = onAutoInterveneRef.current(suggestion);
+            if (autoIntervened) {
+              lastAutoInterveneTimeRef.current = checkNow;
+              lastSuggestionTimeRef.current = checkNow;
+            }
+          }
+          if (!autoIntervened) {
+            // バナー表示にフォールバック（自動介入無効、FC競合、頻度制限中、or confidence 0.7-0.9）
             setCurrentSuggestion(suggestion);
             lastSuggestionTimeRef.current = Date.now();
           }
