@@ -52,8 +52,8 @@ TOOL_SELECTION_PROMPT = """あなたは会議AIアシスタント「Noa」のブ
 - create_task: タスク登録
   args: {{ "title": "タスク名", "assignee": "担当者", "due_date": "YYYY-MM-DD", "priority": "high|medium|low" }}
 
-- generate_diagram: Mermaid記法の図を生成（graph TD/LR のみ対応）
-  args: {{ "description": "図の説明" }}
+- generate_diagram: Mermaid記法の図を生成（flowchart, sequence, gantt, mindmap, pie 対応）
+  args: {{ "description": "図の説明", "diagram_type": "flowchart|sequence|gantt|mindmap|pie (省略時: flowchart)" }}
 
 - search_past_meetings: 過去の会議セッションの内容を検索
   「前回の会議で決まったことは？」「先週のプロジェクトXの議論は？」等
@@ -298,8 +298,11 @@ async def execute_tool(tool_name: str, args: dict, meeting_context: dict) -> dic
 
     elif tool_name == "generate_diagram":
         description = args.get("description", "")
+        diagram_type = args.get("diagram_type", "flowchart")
 
-        base_prompt = f"""以下の説明に基づいて、Mermaid 記法の graph TD 図を生成してください。
+        # 図タイプ別プロンプトテンプレート
+        DIAGRAM_PROMPTS = {
+            "flowchart": f"""以下の説明に基づいて、Mermaid 記法の flowchart 図を生成してください。
 
 **出力ルール (厳守):**
 1. 最初の行は必ず `graph TD` または `graph LR` とすること（flowchart, sequenceDiagram 等は不可）
@@ -317,14 +320,119 @@ graph TD
     classDef primary fill:#EFF6FF,stroke:#3B82F6,color:#1E40AF
     class A,C primary
 
-説明: {description}"""
+説明: {description}""",
 
-        retry_extra = (
-            "\n\n**重要（前回の生成で書式エラーがありました）: "
-            "必ず `graph TD` または `graph LR` から開始してください。"
-            "flowchart, sequenceDiagram 等は使用しないでください。"
-            "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
-        )
+            "sequence": f"""以下の説明に基づいて、Mermaid 記法のシーケンス図を生成してください。
+
+**出力ルール (厳守):**
+1. 最初の行は必ず `sequenceDiagram` とすること
+2. Mermaid コードのみ返すこと（```や説明文は一切不要）
+3. click, href, javascript:, %{{init は使用禁止
+4. 参加者は `participant` で定義すること
+5. メッセージは `->>` (実線) または `-->>` (点線) を使うこと
+6. ループは `loop` ～ `end`、条件分岐は `alt` ～ `else` ～ `end` を使うこと
+
+**出力例:**
+sequenceDiagram
+    participant A as ユーザー
+    participant B as サーバー
+    A->>B: リクエスト
+    B-->>A: レスポンス
+
+説明: {description}""",
+
+            "gantt": f"""以下の説明に基づいて、Mermaid 記法のガントチャートを生成してください。
+
+**出力ルール (厳守):**
+1. 最初の行は必ず `gantt` とすること
+2. Mermaid コードのみ返すこと（```や説明文は一切不要）
+3. click, href, javascript:, %{{init は使用禁止
+4. `title` でチャートタイトルを指定すること
+5. `dateFormat` で日付形式を指定すること（例: YYYY-MM-DD）
+6. `section` でセクション分けし、タスクを記述すること
+
+**出力例:**
+gantt
+    title プロジェクト計画
+    dateFormat YYYY-MM-DD
+    section 設計
+    要件定義 :a1, 2024-01-01, 7d
+    設計 :a2, after a1, 14d
+
+説明: {description}""",
+
+            "mindmap": f"""以下の説明に基づいて、Mermaid 記法のマインドマップを生成してください。
+
+**出力ルール (厳守):**
+1. 最初の行は必ず `mindmap` とすること
+2. Mermaid コードのみ返すこと（```や説明文は一切不要）
+3. click, href, javascript:, %{{init は使用禁止
+4. ルートノードは `root((...))` で定義すること
+5. 子ノードはインデントで階層を表現すること
+
+**出力例:**
+mindmap
+  root((会議))
+    議題A
+      詳細1
+      詳細2
+    議題B
+      詳細3
+
+説明: {description}""",
+
+            "pie": f"""以下の説明に基づいて、Mermaid 記法の円グラフを生成してください。
+
+**出力ルール (厳守):**
+1. 最初の行は必ず `pie` とすること（`pie title タイトル` も可）
+2. Mermaid コードのみ返すこと（```や説明文は一切不要）
+3. click, href, javascript:, %{{init は使用禁止
+4. 各項目は `"ラベル" : 数値` の形式で記述すること
+
+**出力例:**
+pie title タスク状況
+    "完了" : 70
+    "進行中" : 20
+    "未着手" : 10
+
+説明: {description}""",
+        }
+
+        if diagram_type not in DIAGRAM_PROMPTS:
+            return {"success": False, "message": f"未対応の図タイプです: {diagram_type}"}
+
+        base_prompt = DIAGRAM_PROMPTS[diagram_type]
+
+        RETRY_EXTRAS = {
+            "flowchart": (
+                "\n\n**重要（前回の生成で書式エラーがありました）: "
+                "必ず `graph TD` または `graph LR` から開始してください。"
+                "flowchart, sequenceDiagram 等は使用しないでください。"
+                "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
+            ),
+            "sequence": (
+                "\n\n**重要（前回の生成で書式エラーがありました）: "
+                "必ず `sequenceDiagram` から開始してください。"
+                "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
+            ),
+            "gantt": (
+                "\n\n**重要（前回の生成で書式エラーがありました）: "
+                "必ず `gantt` から開始してください。"
+                "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
+            ),
+            "mindmap": (
+                "\n\n**重要（前回の生成で書式エラーがありました）: "
+                "必ず `mindmap` から開始してください。"
+                "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
+            ),
+            "pie": (
+                "\n\n**重要（前回の生成で書式エラーがありました）: "
+                "必ず `pie` から開始してください。"
+                "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
+            ),
+        }
+
+        retry_extra = RETRY_EXTRAS.get(diagram_type, "")
 
         attempts = [
             (0.3, ""),

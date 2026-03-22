@@ -7,11 +7,52 @@ interface MermaidDiagramProps {
   theme?: 'light' | 'dark' | 'modern';
 }
 
+// Supported diagram type prefixes
+const VALID_DIAGRAM_STARTS = [
+  'graph TD', 'graph LR',
+  'flowchart TD', 'flowchart LR', 'flowchart TB', 'flowchart BT', 'flowchart RL',
+  'sequenceDiagram',
+  'gantt',
+  'mindmap',
+  'pie',
+];
+
+function isFlowchart(text: string): boolean {
+  return text.startsWith('graph ') || text.startsWith('flowchart ');
+}
+
+function isValidDiagramStart(text: string): boolean {
+  return VALID_DIAGRAM_STARTS.some(prefix => text.startsWith(prefix));
+}
+
+// Clean comments: fix single % to %%, remove Unicode from comments
+function cleanComments(text: string): string {
+  const lines = text.split('\n');
+  const result: string[] = [];
+  for (let line of lines) {
+    const trimmedLine = line.trim();
+    if (trimmedLine.startsWith('%') && !trimmedLine.startsWith('%%')) {
+      line = line.replace(/^(\s*)%/, '$1%%');
+    }
+    if (trimmedLine.startsWith('%%')) {
+      const commentMatch = line.match(/^(\s*%%)(.*)$/);
+      if (commentMatch) {
+        const indent = commentMatch[1];
+        const commentText = commentMatch[2];
+        const cleanComment = commentText.replace(/[^\x00-\x7F]/g, '').trim();
+        line = indent + (cleanComment ? ' ' + cleanComment : ' Comment');
+      }
+    }
+    result.push(line);
+  }
+  return result.join('\n');
+}
+
 // Function to clean and fix common Mermaid syntax issues
 const cleanMermaidDefinition = (definition: string): string => {
   console.log("cleanMermaidDefinition: Input:", definition);
   console.log("cleanMermaidDefinition: Input type:", typeof definition);
-  
+
   if (!definition || typeof definition !== 'string') {
     console.warn("cleanMermaidDefinition: Invalid input, returning fallback");
     return 'graph TD;\n    A[No diagram data];';
@@ -19,20 +60,34 @@ const cleanMermaidDefinition = (definition: string): string => {
 
   let cleaned = definition.trim();
   console.log("cleanMermaidDefinition: After trim:", cleaned);
-  
+
   // Remove any markdown code blocks if they somehow got through
   if (cleaned.startsWith('```mermaid')) {
     cleaned = cleaned.replace(/^```mermaid\s*/, '').replace(/```\s*$/, '');
   } else if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```\s*/, '').replace(/```\s*$/, '');
   }
-  
+
   // Ensure cleaned is still a string after processing
   if (!cleaned || typeof cleaned !== 'string') {
     console.error("cleanMermaidDefinition: Cleaned became invalid, returning fallback");
     return 'graph TD;\n    A[Processing error];';
   }
-  
+
+  // Non-flowchart diagrams: minimal cleaning only (comment sanitize + line ending normalization)
+  if (!isFlowchart(cleaned)) {
+    if (!isValidDiagramStart(cleaned)) {
+      console.warn('Mermaid definition is not a supported diagram type');
+      return 'graph TD;\n    A[Invalid diagram format];\n    B[Please check the diagram definition];\n    A --> B;';
+    }
+    cleaned = cleanComments(cleaned);
+    cleaned = cleaned.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    console.log(`cleanMermaidDefinition: Non-flowchart result - ${cleaned.split('\n').length} lines`);
+    return cleaned;
+  }
+
+  // === Flowchart-specific cleaning below ===
+
   // If the content appears to be on a single line (no newlines), try to add some formatting
   if (!cleaned.includes('\n') && cleaned.length > 100) {
     console.log("cleanMermaidDefinition: Single line detected, attempting to add line breaks");
@@ -54,7 +109,7 @@ const cleanMermaidDefinition = (definition: string): string => {
       .replace(/(\s+-->\s+[^;\n]+)(\s+)([A-Z_]+)/g, '$1\n    $3')
       .replace(/(\s+--\s*"[^"]*"\s*-->\s+[^;\n]+)(\s+)([A-Z_]+)/g, '$1\n    $3');
   }
-  
+
   // Clean up problematic characters and syntax but preserve structure
   cleaned = cleaned
     // Fix HTML line breaks in text
@@ -63,33 +118,33 @@ const cleanMermaidDefinition = (definition: string): string => {
     .replace(/-->/g, ' --> ')
     .replace(/--->/g, ' ---> ')
     .replace(/-\.->/g, ' -.-> ');
-  
+
   // Split into lines for processing
   const lines = cleaned.split('\n');
   const cleanedLines: string[] = [];
-  
+
   console.log("cleanMermaidDefinition: Split into", lines.length, "lines");
-  
+
   for (let line of lines) {
     // Ensure line is a string
     if (typeof line !== 'string') {
       console.warn("cleanMermaidDefinition: Non-string line detected, skipping:", line);
       continue;
     }
-    
+
     const trimmedLine = line.trim();
-    
+
     // Skip empty lines
     if (!trimmedLine) {
       cleanedLines.push('');
       continue;
     }
-    
+
     // Fix single % comments to %%
     if (trimmedLine.startsWith('%') && !trimmedLine.startsWith('%%')) {
       line = line.replace(/^(\s*)%/, '$1%%');
     }
-    
+
     // Clean Unicode characters from comments to prevent parse errors
     if (trimmedLine.startsWith('%%')) {
       const commentMatch = line.match(/^(\s*%%)(.*)$/);
@@ -101,12 +156,12 @@ const cleanMermaidDefinition = (definition: string): string => {
         line = indent + (cleanComment ? ' ' + cleanComment : ' Comment');
       }
     }
-    
+
     // Remove any trailing semicolons that might cause issues
     if (trimmedLine.endsWith(';;')) {
       line = line.replace(/;;$/, ';');
     }
-    
+
     // Fix subgraph syntax issues
     if (trimmedLine.includes('subgraph') && !trimmedLine.match(/^subgraph\s+\w+(\[.*\])?$/)) {
       // Ensure proper subgraph syntax
@@ -123,12 +178,12 @@ const cleanMermaidDefinition = (definition: string): string => {
         }
       }
     }
-    
+
     cleanedLines.push(line);
   }
-  
+
   let result = cleanedLines.join('\n').trim();
-  
+
   // Additional post-processing for complex diagrams
   result = result
     // Ensure proper spacing in subgraph labels
@@ -142,7 +197,7 @@ const cleanMermaidDefinition = (definition: string): string => {
     // Ensure proper line endings
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n');
-  
+
   // If still appears to be a single line, force line breaks more aggressively
   const lineCount = result.split('\n').length;
   if (lineCount < 5 && result.length > 200) {
@@ -167,13 +222,13 @@ const cleanMermaidDefinition = (definition: string): string => {
       .replace(/\n\s*\n\s*\n/g, '\n\n')
       .trim();
   }
-  
+
   // Validate that it starts with a proper graph declaration
   if (!result.startsWith('graph TD') && !result.startsWith('graph LR')) {
     console.warn('Mermaid definition does not start with graph TD/LR, adding default');
     return 'graph TD;\n    A[Invalid diagram format];\n    B[Please check the diagram definition];\n    A --> B;';
   }
-  
+
   const finalLineCount = result.split('\n').length;
   console.log(`cleanMermaidDefinition: Final result - ${finalLineCount} lines, ${result.length} chars`);
   if (finalLineCount < 10) {
@@ -248,7 +303,7 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = React.memo(({ definition, 
           mermaid.initialize({
             startOnLoad: false,
             theme: mermaidTheme,
-            securityLevel: 'loose',
+            securityLevel: 'strict',
             fontFamily: 'Arial, sans-serif',
             flowchart: {
               useMaxWidth: true,
