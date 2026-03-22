@@ -53,7 +53,7 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_falls_back_to_existing_diagram_when_validation_fails(self):
+    async def test_falls_back_to_existing_diagram_when_all_retries_fail(self):
         current_data = {
             "overviewDiagram": {
                 "mermaidDefinition": "graph TD\nA[Existing]",
@@ -65,7 +65,7 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
             overview_diagram_agent,
             "llm_complete",
             AsyncMock(return_value="not mermaid"),
-        ), patch.object(
+        ) as mock_llm, patch.object(
             overview_diagram_agent,
             "validate_and_clean_mermaid",
             return_value=None,
@@ -78,12 +78,70 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
                 api_key="test-key",
             )
 
+        self.assertEqual(mock_llm.await_count, 2)
         self.assertEqual(
             result["overviewDiagram"],
             {
                 "mermaidDefinition": "graph TD\nA[Existing]",
                 "title": "Existing title",
             },
+        )
+        self.assertIn("expected Mermaid format", message)
+
+    async def test_succeeds_on_retry(self):
+        current_data = {
+            "overviewDiagram": {
+                "mermaidDefinition": "graph TD\nA[Old]",
+                "title": "Old title",
+            }
+        }
+        cleaned = "graph TD\nA[New] --> B[Updated]"
+
+        with patch.object(
+            overview_diagram_agent,
+            "llm_complete",
+            AsyncMock(return_value="some output"),
+        ) as mock_llm, patch.object(
+            overview_diagram_agent,
+            "validate_and_clean_mermaid",
+            side_effect=[None, cleaned],
+        ):
+            result, _message = await overview_diagram_agent.handle_overview_diagram_request(
+                instruction="Update diagram",
+                conversation_history=[],
+                current_data=current_data,
+                model_name="gemini-2.5-flash",
+                api_key="test-key",
+            )
+
+        self.assertEqual(mock_llm.await_count, 2)
+        self.assertEqual(result["overviewDiagram"]["mermaidDefinition"], cleaned)
+
+    async def test_no_retry_on_exception(self):
+        current_data = {
+            "overviewDiagram": {
+                "mermaidDefinition": "graph TD\nA[Existing]",
+                "title": "Existing title",
+            }
+        }
+
+        with patch.object(
+            overview_diagram_agent,
+            "llm_complete",
+            AsyncMock(side_effect=Exception("API Error")),
+        ) as mock_llm:
+            result, message = await overview_diagram_agent.handle_overview_diagram_request(
+                instruction="Try update",
+                conversation_history=[],
+                current_data=current_data,
+                model_name="gemini-2.5-flash",
+                api_key="test-key",
+            )
+
+        mock_llm.assert_awaited_once()
+        self.assertEqual(
+            result["overviewDiagram"]["mermaidDefinition"],
+            "graph TD\nA[Existing]",
         )
         self.assertIn("expected Mermaid format", message)
 

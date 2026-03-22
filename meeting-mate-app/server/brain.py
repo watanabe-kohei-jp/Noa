@@ -298,45 +298,77 @@ async def execute_tool(tool_name: str, args: dict, meeting_context: dict) -> dic
 
     elif tool_name == "generate_diagram":
         description = args.get("description", "")
-        try:
-            mermaid_prompt = f"""以下の説明に基づいて、Mermaid 記法の graph TD 図を生成してください。
 
-**出力ルール:**
-- graph TD または graph LR で開始すること（他のタイプは不可）
-- コードブロックや説明文は不要、Mermaid コードのみ返すこと
-- click, href, javascript:, %{{init は使用禁止
-- classDef でフラットデザインのスタイルを定義すること
-- ノードへのクラス適用は class コマンドを使用（:::は禁止）
-- subgraph タイトルはダブルクォートで囲むこと
+        base_prompt = f"""以下の説明に基づいて、Mermaid 記法の graph TD 図を生成してください。
+
+**出力ルール (厳守):**
+1. 最初の行は必ず `graph TD` または `graph LR` とすること（flowchart, sequenceDiagram 等は不可）
+2. Mermaid コードのみ返すこと（```や説明文は一切不要）
+3. click, href, javascript:, %{{init は使用禁止
+4. classDef でフラットデザインのスタイルを定義すること
+5. ノードへのクラス適用は `class NodeId className` コマンドを使用（`:::` は禁止）
+6. subgraph タイトルはダブルクォートで囲むこと（例: `subgraph "セクション名"`）
+7. コメントは `%%` で記述すること（`%` 単体は不可）
+
+**出力例:**
+graph TD
+    A["開始"] --> B["処理"]
+    B --> C["終了"]
+    classDef primary fill:#EFF6FF,stroke:#3B82F6,color:#1E40AF
+    class A,C primary
 
 説明: {description}"""
 
-            mermaid_raw = await llm_complete(
-                model=BRAIN_LLM_MODEL,
-                prompt=mermaid_prompt,
-                api_key=get_default_api_key(BRAIN_LLM_MODEL),
-                temperature=0.3,
-                max_tokens=2000,
-            )
-            mermaid_code = validate_and_clean_mermaid(mermaid_raw)
-            if not mermaid_code:
-                return {"success": False, "message": "有効な Mermaid コードを生成できませんでした。"}
+        retry_extra = (
+            "\n\n**重要（前回の生成で書式エラーがありました）: "
+            "必ず `graph TD` または `graph LR` から開始してください。"
+            "flowchart, sequenceDiagram 等は使用しないでください。"
+            "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
+        )
 
-            # タイトル: description を30文字に切り詰め
-            title = description.strip()[:30]
-            if len(description.strip()) > 30:
-                title += "..."
-            title = f"概要図: {title}" if title else "会議の概要図"
+        attempts = [
+            (0.3, ""),
+            (0.3, retry_extra),
+        ]
 
-            return {
-                "success": True,
-                "mermaid_code": mermaid_code,
-                "title": title,
-                "description": description,
-            }
-        except Exception as e:
-            logger.error(f"[Brain] generate_diagram failed: {e}")
-            return {"success": False, "message": f"図の生成に失敗しました: {e}"}
+        mermaid_code = None
+        for attempt_idx, (temp, extra) in enumerate(attempts):
+            try:
+                mermaid_raw = await llm_complete(
+                    model=BRAIN_LLM_MODEL,
+                    prompt=base_prompt + extra,
+                    api_key=get_default_api_key(BRAIN_LLM_MODEL),
+                    temperature=temp,
+                    max_tokens=2000,
+                )
+                mermaid_code = validate_and_clean_mermaid(mermaid_raw)
+                if mermaid_code:
+                    if attempt_idx > 0:
+                        logger.info(f"[Brain] generate_diagram succeeded on retry (attempt {attempt_idx + 1})")
+                    break
+                logger.warning(
+                    f"[Brain] generate_diagram validation failed (attempt {attempt_idx + 1}/{len(attempts)}), "
+                    f"raw preview: {mermaid_raw[:100]}..."
+                )
+            except Exception as e:
+                logger.error(f"[Brain] generate_diagram LLM call failed (attempt {attempt_idx + 1}): {e}")
+                return {"success": False, "message": "図の生成に失敗しました。"}
+
+        if not mermaid_code:
+            return {"success": False, "message": "有効な Mermaid コードを生成できませんでした。"}
+
+        # タイトル: description を30文字に切り詰め
+        title = description.strip()[:30]
+        if len(description.strip()) > 30:
+            title += "..."
+        title = f"概要図: {title}" if title else "会議の概要図"
+
+        return {
+            "success": True,
+            "mermaid_code": mermaid_code,
+            "title": title,
+            "description": description,
+        }
 
     elif tool_name == "search_past_meetings":
         query = args.get("query", "")

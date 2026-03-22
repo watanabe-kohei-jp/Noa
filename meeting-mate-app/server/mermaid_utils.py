@@ -34,7 +34,13 @@ def validate_and_clean_mermaid(raw_text: str) -> str | None:
     elif cleaned.startswith("`") and cleaned.endswith("`"):
         cleaned = cleaned[1:-1].strip()
 
-    # 2. graph TD/LR で始まるかチェック
+    # 2. flowchart TD/LR → graph TD/LR 正規化
+    if cleaned.startswith("flowchart TD"):
+        cleaned = "graph TD" + cleaned[len("flowchart TD"):]
+    elif cleaned.startswith("flowchart LR"):
+        cleaned = "graph LR" + cleaned[len("flowchart LR"):]
+
+    # 3. graph TD/LR で始まるかチェック
     if not (cleaned.startswith("graph TD") or cleaned.startswith("graph LR")):
         logger.warning(
             f"[mermaid_utils] Mermaid code doesn't start with 'graph TD/LR': {cleaned[:50]}..."
