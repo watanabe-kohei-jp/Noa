@@ -19,7 +19,7 @@ from firebase_admin import credentials, auth as firebase_auth, db
 import firebase_admin
 import os
 import json
-from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
@@ -945,7 +945,7 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 
         try:
             transcript_ref.push(new_ai_entry.model_dump())
-            logger.info(f"Pushed AI instructions to transcript (push-key format).")
+            logger.info("Pushed AI instructions to transcript (push-key format).")
         except Exception as e:
             logger.error(f"Error updating transcript: {e}", exc_info=True)
 

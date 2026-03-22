@@ -56,10 +56,31 @@ function LivePanelInner({
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connect, disconnect, volume } =
     useLiveAPIContext();
-  const { addTask, updateTask } = useThinkingQueue();
+  const { addTask, updateTask, clear: clearThinkingQueue } = useThinkingQueue();
 
   const [mode, setMode] = useState<LiveMode>("passive");
   const toolHandlerRef = useRef<LiveToolHandler>(new LiveToolHandler());
+
+  // Auto-intervene setting (persisted in localStorage)
+  const [autoInterveneEnabled, setAutoInterveneEnabled] = useState(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const stored = localStorage.getItem("noa-proactive-auto-intervene");
+      return stored === null ? true : stored === "true";
+    } catch {
+      return true;
+    }
+  });
+  const toggleAutoIntervene = useCallback(() => {
+    setAutoInterveneEnabled((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("noa-proactive-auto-intervene", String(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+
+  // Track proactive injection time for AI-to-AI loop prevention
+  const lastProactiveInjectTimeRef = useRef(0);
 
   // Audio recording (merged from LiveControlTray)
   const [inVolume, setInVolume] = useState(0);
@@ -106,16 +127,49 @@ function LivePanelInner({
       });
     },
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
+  const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
+
+  // Auto-intervene handler: confidence >= 0.9 → バナーなしで Live AI にテキスト注入
+  // Returns true if injection succeeded, false to fall back to banner
+  const handleAutoIntervene = useCallback((suggestion: { suggestion: string }): boolean => {
+    if (!connected) return false;
+    if (toolHandlerRef.current.hasActiveFunctionCalls()) {
+      console.log("[LivePanel] FC in progress, skipping auto-intervene → banner fallback");
+      return false;
+    }
+    client.send(
+      { text: `【プロアクティブ】${suggestion.suggestion}\n確認してみますね。` },
+      true,
+    );
+    lastProactiveInjectTimeRef.current = Date.now();
+    console.log("[LivePanel] Auto-intervene sent:", suggestion.suggestion.slice(0, 50));
+    return true;
+  }, [client, connected]);
 
   // Proactive monitor (Active mode only)
-  const { currentSuggestion, dismissSuggestion } = useProactiveMonitor({
+  const { currentSuggestion, dismissSuggestion, acceptSuggestion } = useProactiveMonitor({
     enabled: mode === "active" && connected,
+    autoInterveneEnabled,
+    onAutoIntervene: handleAutoIntervene,
     roomData,
     roomId,
     currentSessionId: currentSessionId ?? null,
     thinkingQueue,
   });
+
+  // Proactive action handler: バナーの「確認する」ボタン → Live AI にテキスト注入
+  const handleProactiveAction = useCallback((suggestion: { suggestion: string }) => {
+    if (!connected) return;
+    if (toolHandlerRef.current.hasActiveFunctionCalls()) {
+      console.log("[LivePanel] FC in progress, deferring proactive action");
+      return;
+    }
+    client.send({ text: `【プロアクティブ】${suggestion.suggestion}` }, true);
+    lastProactiveInjectTimeRef.current = Date.now();
+    acceptSuggestion();
+    console.log("[LivePanel] Proactive action sent:", suggestion.suggestion.slice(0, 50));
+  }, [client, connected, acceptSuggestion]);
+
   // sendText: page.tsx から Live AI にテキストを送信する
   const sendText = useCallback((text: string) => {
     if (!connected) {
@@ -248,6 +302,8 @@ function LivePanelInner({
   }, [roomData, requestBrain]);
 
   // Sync transcript to Firebase (with origin)
+  // AI-to-AI ループ防止: proactive 注入後 15 秒以内の AI 発話は "proactive_ai" origin でマーク
+  const PROACTIVE_ORIGIN_WINDOW_MS = 15_000;
   const syncTranscriptToFirebase = useCallback(
     (text: string, role: "user" | "ai") => {
       // AI発話の場合、内部思考テキスト (markdown) をフィルタ
@@ -255,6 +311,20 @@ function LivePanelInner({
       if (!roomId || !cleanText.trim()) return;
       const db = getDatabase();
       if (!db) return;
+
+      // proactive 起点かどうかを判定
+      let origin: string;
+      if (role === "ai") {
+        const isProactiveResponse =
+          lastProactiveInjectTimeRef.current > 0 &&
+          Date.now() - lastProactiveInjectTimeRef.current < PROACTIVE_ORIGIN_WINDOW_MS;
+        origin = isProactiveResponse ? "proactive_ai" : "live_ai";
+        if (isProactiveResponse) {
+          lastProactiveInjectTimeRef.current = 0; // 一度マークしたらリセット
+        }
+      } else {
+        origin = "human_stt";
+      }
 
       const path = currentSessionId
         ? `rooms/${roomId}/sessions/${currentSessionId}/transcript`
@@ -268,7 +338,7 @@ function LivePanelInner({
         role,
         speakerId: role === "ai" ? "noa" : "live-user",
         source: "live-api",
-        origin: role === "ai" ? "live_ai" : "human_stt",
+        origin,
       });
     },
     [roomId, currentSessionId]
@@ -443,6 +513,33 @@ function LivePanelInner({
     setTabAudioActive(false);
   }, []);
 
+  // Disconnect cleanup (shared between button click and useEffect fallback)
+  const cleanupOnDisconnect = useCallback(() => {
+    abortBrain();                                // 1. in-flight HTTP abort + abortedRef 設定
+    toolHandlerRef.current.resetForDisconnect(); // 2. 世代進行 + active FC 全キャンセル + debounce リセット
+    clearThinkingQueue();                        // 3. UI 即クリア
+    stopTabAudio();                              // 4. Tab audio 停止
+  }, [abortBrain, clearThinkingQueue, stopTabAudio]);
+
+  const handleDisconnect = useCallback(() => {
+    cleanupOnDisconnect();
+    disconnect();
+  }, [cleanupOnDisconnect, disconnect]);
+
+  const handleConnect = useCallback(() => {
+    connect();
+  }, [connect]);
+
+  // Fallback cleanup: ネットワーク断・サーバー close・unmount 時にも cleanup を実行
+  const prevConnectedRef = useRef(false);
+  useEffect(() => {
+    if (prevConnectedRef.current && !connected) {
+      // handleDisconnect 経由でない切断（ネットワーク断等）をキャッチ
+      cleanupOnDisconnect();
+    }
+    prevConnectedRef.current = connected;
+  }, [connected, cleanupOnDisconnect]);
+
   const startTabAudio = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -547,6 +644,7 @@ function LivePanelInner({
       <ProactiveSuggestionBanner
         suggestion={currentSuggestion}
         onDismiss={dismissSuggestion}
+        onAction={handleProactiveAction}
       />
 
       {/* Hidden elements for tab capture */}
@@ -561,7 +659,7 @@ function LivePanelInner({
 
       {/* Connect / Disconnect */}
       <button
-        onClick={connected ? disconnect : connect}
+        onClick={connected ? handleDisconnect : handleConnect}
         disabled={!connected && !sharedStream}
         className={`p-2 rounded-xl transition-all ${
           connected
@@ -596,6 +694,21 @@ function LivePanelInner({
           <ToggleLeft size={16} />
         )}
       </button>
+
+      {/* Auto-intervene toggle (Active mode only) */}
+      {mode === "active" && (
+        <button
+          onClick={toggleAutoIntervene}
+          className={`px-1.5 py-1 rounded-lg text-[10px] font-medium transition-all ${
+            autoInterveneEnabled
+              ? "bg-orange-200 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300"
+              : "bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400"
+          }`}
+          title={autoInterveneEnabled ? "自動介入 ON" : "自動介入 OFF"}
+        >
+          自動{autoInterveneEnabled ? "ON" : "OFF"}
+        </button>
+      )}
 
       {/* Tab audio capture */}
       {connected && (
