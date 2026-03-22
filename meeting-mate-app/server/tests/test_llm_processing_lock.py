@@ -8,7 +8,7 @@ SERVER_DIR = os.path.dirname(os.path.dirname(__file__))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
-from main import _get_processing_lock, _llm_processing_locks
+from main import _get_processing_lock, _llm_processing_locks  # noqa: E402
 
 
 class GetProcessingLockTests(unittest.TestCase):
@@ -85,7 +85,7 @@ class LockExclusionTests(unittest.TestCase):
         self.assertIn("w1:acquired", execution_log)
         self.assertIn("w2:acquired", execution_log)
         # w2 は w1 の完了を待たずに開始できる（並列）
-        w1_acquired_idx = execution_log.index("w1:acquired")
+        _ = execution_log.index("w1:acquired")
         w2_acquired_idx = execution_log.index("w2:acquired")
         w1_released_idx = execution_log.index("w1:released")
         # w2 は w1 が release する前に acquire できる

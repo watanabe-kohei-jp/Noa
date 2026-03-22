@@ -59,6 +59,10 @@ export class LiveToolHandler {
     this.callbacks = callbacks;
   }
 
+  hasActiveFunctionCalls(): boolean {
+    return this.activeFunctionCallIds.size > 0;
+  }
+
   markCancelled(id: string) {
     if (this.activeFunctionCallIds.has(id)) {
       this.cancelledIds.add(id);
