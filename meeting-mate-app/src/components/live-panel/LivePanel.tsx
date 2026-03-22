@@ -56,7 +56,7 @@ function LivePanelInner({
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connect, disconnect, volume } =
     useLiveAPIContext();
-  const { addTask, updateTask } = useThinkingQueue();
+  const { addTask, updateTask, clear: clearThinkingQueue } = useThinkingQueue();
 
   const [mode, setMode] = useState<LiveMode>("passive");
   const toolHandlerRef = useRef<LiveToolHandler>(new LiveToolHandler());
@@ -127,7 +127,7 @@ function LivePanelInner({
       });
     },
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
+  const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
 
   // Auto-intervene handler: confidence >= 0.9 → バナーなしで Live AI にテキスト注入
   // Returns true if injection succeeded, false to fall back to banner
@@ -513,6 +513,33 @@ function LivePanelInner({
     setTabAudioActive(false);
   }, []);
 
+  // Disconnect cleanup (shared between button click and useEffect fallback)
+  const cleanupOnDisconnect = useCallback(() => {
+    abortBrain();                                // 1. in-flight HTTP abort + abortedRef 設定
+    toolHandlerRef.current.resetForDisconnect(); // 2. 世代進行 + active FC 全キャンセル + debounce リセット
+    clearThinkingQueue();                        // 3. UI 即クリア
+    stopTabAudio();                              // 4. Tab audio 停止
+  }, [abortBrain, clearThinkingQueue, stopTabAudio]);
+
+  const handleDisconnect = useCallback(() => {
+    cleanupOnDisconnect();
+    disconnect();
+  }, [cleanupOnDisconnect, disconnect]);
+
+  const handleConnect = useCallback(() => {
+    connect();
+  }, [connect]);
+
+  // Fallback cleanup: ネットワーク断・サーバー close・unmount 時にも cleanup を実行
+  const prevConnectedRef = useRef(false);
+  useEffect(() => {
+    if (prevConnectedRef.current && !connected) {
+      // handleDisconnect 経由でない切断（ネットワーク断等）をキャッチ
+      cleanupOnDisconnect();
+    }
+    prevConnectedRef.current = connected;
+  }, [connected, cleanupOnDisconnect]);
+
   const startTabAudio = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -632,7 +659,7 @@ function LivePanelInner({
 
       {/* Connect / Disconnect */}
       <button
-        onClick={connected ? disconnect : connect}
+        onClick={connected ? handleDisconnect : handleConnect}
         disabled={!connected && !sharedStream}
         className={`p-2 rounded-xl transition-all ${
           connected

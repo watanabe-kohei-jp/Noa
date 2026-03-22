@@ -50,6 +50,24 @@ export class LiveToolHandler {
   private activeFunctionCallIds = new Set<string>();
   /** cancel が activeFunctionCallIds.add() より先に来た場合の先行記録 */
   private pendingCancellations = new Set<string>();
+  private sessionGeneration = 0;
+
+  incrementGeneration(): number {
+    return ++this.sessionGeneration;
+  }
+
+  resetForDisconnect() {
+    // セッション世代を進める（disconnect 窓の race condition 防止）
+    this.sessionGeneration++;
+    // 全 active FC をキャンセル扱い
+    for (const id of this.activeFunctionCallIds) {
+      this.cancelledIds.add(id);
+    }
+    this.pendingCancellations.clear();
+    // debounce 状態をリセット（再接続後の正当なリクエストが棄却されないように）
+    this.lastBrainRequest = "";
+    this.lastBrainTime = 0;
+  }
 
   setContextProvider(provider: MeetingContextProvider) {
     this.contextProvider = provider;
@@ -228,7 +246,15 @@ export class LiveToolHandler {
       }
 
       console.log("[ToolHandler] Awaiting brain result...");
+      const gen = this.sessionGeneration;
       const brainResult = await this.callbacks.onBrainRequested({ request });
+
+      // セッション世代が変わった場合、stale response を破棄
+      if (this.sessionGeneration !== gen) {
+        console.log("[ToolHandler] Session changed during brain request, discarding result");
+        this.cleanupFunctionCall(fcId);
+        return;
+      }
 
       if (this.cancelledIds.has(fcId)) {
         console.log(

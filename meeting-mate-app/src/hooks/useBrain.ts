@@ -46,6 +46,8 @@ export function useBrain(
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
   const inFlightCountRef = useRef(0);
+  const controllersRef = useRef<Set<AbortController>>(new Set());
+  const abortedRef = useRef(false);
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const thinkingQueueRef = useRef(thinkingQueue);
@@ -56,6 +58,7 @@ export function useBrain(
   const requestBrain = useCallback(
     async (request: { request: string }): Promise<BrainResult> => {
       console.log("[useBrain] requestBrain called:", request);
+      abortedRef.current = false;
       inFlightCountRef.current += 1;
       setIsProcessing(true);
 
@@ -72,6 +75,7 @@ export function useBrain(
 
         // 60秒タイムアウト付き authFetch
         const controller = new AbortController();
+        controllersRef.current.add(controller);
         const timeoutId = setTimeout(() => controller.abort(), 60_000);
 
         let res: Response;
@@ -87,6 +91,7 @@ export function useBrain(
           });
         } finally {
           clearTimeout(timeoutId);
+          controllersRef.current.delete(controller);
         }
 
         if (!res.ok) {
@@ -148,6 +153,11 @@ export function useBrain(
           });
         }
 
+        // abort 済みなら副作用（Firebase write）をスキップ
+        if (abortedRef.current) {
+          return { response_text: "" };
+        }
+
         // アクションの処理（タスク作成、図生成）
         if (data.actions && Array.isArray(data.actions)) {
           for (const action of data.actions as BrainAction[]) {
@@ -175,6 +185,19 @@ export function useBrain(
           metadata: data.metadata,
         };
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          if (abortedRef.current) {
+            // disconnect による abort → silent（ThinkingQueue は clear() で一括クリア済み）
+            console.log("[useBrain] Request aborted (disconnect)");
+            return { response_text: "" };
+          }
+          // timeout による abort → エラー表示
+          console.error("[useBrain] Request timed out");
+          thinkingQueueRef.current?.updateTask(requestId, {
+            status: "error",
+          });
+          return { response_text: "リクエストがタイムアウトしました。" };
+        }
         console.error("[useBrain] failed:", err);
         thinkingQueueRef.current?.updateTask(requestId, {
           status: "error",
@@ -188,5 +211,13 @@ export function useBrain(
     [roomData, roomId]
   );
 
-  return { isProcessing, requestBrain };
+  const abortAll = useCallback(() => {
+    abortedRef.current = true;
+    for (const c of controllersRef.current) c.abort("disconnect");
+    controllersRef.current.clear();
+    inFlightCountRef.current = 0;
+    setIsProcessing(false);
+  }, []);
+
+  return { isProcessing, requestBrain, abortAll };
 }
