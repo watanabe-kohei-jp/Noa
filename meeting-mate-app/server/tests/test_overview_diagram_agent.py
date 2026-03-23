@@ -44,7 +44,7 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         mock_llm.assert_awaited_once()
-        mock_validator.assert_called_once_with(llm_output)
+        mock_validator.assert_called_once_with(llm_output, allowed_types=["flowchart"])
         self.assertEqual(
             result["overviewDiagram"],
             {

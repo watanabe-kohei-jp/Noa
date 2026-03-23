@@ -195,7 +195,7 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
                     logger.warning(f"[OverviewDiagram] Empty response (attempt {attempt_idx + 1}/{len(attempts)})")
                     continue
 
-                new_mermaid_definition = validate_and_clean_mermaid(llm_response_text)
+                new_mermaid_definition = validate_and_clean_mermaid(llm_response_text, allowed_types=["flowchart"])
                 if new_mermaid_definition:
                     if attempt_idx > 0:
                         logger.info(f"[OverviewDiagram] Succeeded on retry (attempt {attempt_idx + 1})")
