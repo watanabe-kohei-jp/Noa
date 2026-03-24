@@ -1,8 +1,39 @@
 """
-Knowledge Base - モックデータベース
-将来は PBL/freelance-toolkit 等の実データやベクトルDBに差し替え可能
-"""
+Knowledge Base — Provider パターンによるナレッジベース検索
 
+- MockKnowledgeBase: ハードコードされたモックデータ（キーワードマッチング）
+- VectorKnowledgeBase: ChromaDB + Gemini Embedding によるベクトル検索
+- get_knowledge_base(): 環境変数 KNOWLEDGE_BASE_PROVIDER で切替（シングルトン）
+"""
+import asyncio
+import logging
+from datetime import datetime
+from typing import Protocol, runtime_checkable
+
+import chromadb
+from google import genai
+
+from config import (
+    CHROMA_PERSIST_DIR,
+    DEFAULT_GEMINI_API_KEY,
+    EMBEDDING_MODEL,
+    KB_MAX_SEARCH_DISTANCE,
+    KNOWLEDGE_BASE_PROVIDER,
+)
+
+logger = logging.getLogger(__name__)
+
+# ================================================================
+# 共通定数
+# ================================================================
+
+VALID_CATEGORIES = {"sales", "policies", "projects", "general"}
+SNIPPET_MAX_LENGTH = 500
+
+
+# ================================================================
+# データクラス
+# ================================================================
 
 class KnowledgeResult:
     def __init__(self, title: str, content: str, category: str, relevance: float, source: str = "mock"):
@@ -21,6 +52,19 @@ class KnowledgeResult:
             "source": self.source,
         }
 
+
+# ================================================================
+# Protocol（search のみ）
+# ================================================================
+
+@runtime_checkable
+class KnowledgeBase(Protocol):
+    async def search(self, query: str, category: str | None = None) -> list[KnowledgeResult]: ...
+
+
+# ================================================================
+# Mock 実装
+# ================================================================
 
 MOCK_DATA = [
     {
@@ -130,3 +174,163 @@ class MockKnowledgeBase:
             )
             for e, s in scored[:3]
         ]
+
+
+# ================================================================
+# Vector 実装（ChromaDB + Gemini Embedding）
+# ================================================================
+
+class VectorKnowledgeBase:
+    """ChromaDB + Gemini Embedding によるベクトル検索ナレッジベース"""
+
+    def __init__(self):
+        self.chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+        self.collection = self.chroma_client.get_or_create_collection(
+            name="knowledge_base",
+            metadata={"hnsw:space": "cosine"},
+        )
+        self.genai_client = genai.Client(api_key=DEFAULT_GEMINI_API_KEY)
+        logger.info(
+            f"[KnowledgeBase] VectorKnowledgeBase initialized. "
+            f"ChromaDB: {CHROMA_PERSIST_DIR}, Embedding: {EMBEDDING_MODEL}, "
+            f"Documents: {self.collection.count()}"
+        )
+
+    async def _get_embedding(self, text: str) -> list[float]:
+        """Gemini Embedding API でテキストをベクトル化（イベントループ非ブロック）"""
+        def _sync_embed():
+            result = self.genai_client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=text,
+            )
+            return result.embeddings[0].values
+        return await asyncio.to_thread(_sync_embed)
+
+    async def search(self, query: str, category: str | None = None) -> list[KnowledgeResult]:
+        if not query or self.collection.count() == 0:
+            return []
+
+        query_embedding = await self._get_embedding(query)
+
+        kwargs: dict = {
+            "query_embeddings": [query_embedding],
+            "n_results": min(3, self.collection.count()),
+        }
+        if category:
+            kwargs["where"] = {"category": category}
+
+        results = self.collection.query(**kwargs)
+
+        knowledge_results = []
+        if results and results["ids"] and results["ids"][0]:
+            for i, doc_id in enumerate(results["ids"][0]):
+                distance = results["distances"][0][i] if results["distances"] else None
+                if distance is not None and distance > KB_MAX_SEARCH_DISTANCE:
+                    continue
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                doc_text = results["documents"][0][i] if results["documents"] else ""
+
+                # snippet: 先頭 SNIPPET_MAX_LENGTH 文字に切り詰め
+                snippet = doc_text[:SNIPPET_MAX_LENGTH]
+                if len(doc_text) > SNIPPET_MAX_LENGTH:
+                    snippet += "..."
+
+                knowledge_results.append(KnowledgeResult(
+                    title=meta.get("title", "不明"),
+                    content=snippet,
+                    category=meta.get("category", "general"),
+                    relevance=round(1.0 - (distance or 0.0), 3),
+                    source=meta.get("source", "vector-knowledge-base"),
+                ))
+
+        return knowledge_results
+
+    def add_document(
+        self,
+        doc_id: str,
+        title: str,
+        content: str,
+        category: str = "general",
+        source: str = "manual",
+        max_chunk_size: int = 1000,
+    ) -> int:
+        """ドキュメントをベクトル化して ChromaDB に追加。長文は chunk 分割。
+
+        Returns:
+            投入された chunk 数
+        """
+        if category not in VALID_CATEGORIES:
+            raise ValueError(
+                f"Invalid category '{category}'. Must be one of: {sorted(VALID_CATEGORIES)}"
+            )
+
+        # chunk 分割
+        chunks = []
+        if len(content) <= max_chunk_size:
+            chunks.append(content)
+        else:
+            for start in range(0, len(content), max_chunk_size):
+                chunks.append(content[start:start + max_chunk_size])
+
+        now = datetime.now().isoformat()
+        for i, chunk in enumerate(chunks):
+            chunk_id = doc_id if len(chunks) == 1 else f"{doc_id}::chunk_{i}"
+
+            # 同期 embedding（add_document は CLI/バッチ用なので同期で OK）
+            result = self.genai_client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=chunk,
+            )
+            embedding = result.embeddings[0].values
+
+            self.collection.upsert(
+                ids=[chunk_id],
+                embeddings=[embedding],
+                documents=[chunk],
+                metadatas=[{
+                    "title": title,
+                    "category": category,
+                    "source": source,
+                    "added_at": now,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                }],
+            )
+
+        logger.info(
+            f"[KnowledgeBase] Added document '{doc_id}' ({len(chunks)} chunk(s), "
+            f"category={category})"
+        )
+        return len(chunks)
+
+
+# ================================================================
+# ファクトリ（シングルトン + フォールバック）
+# ================================================================
+
+_kb_instance: KnowledgeBase | None = None
+
+
+def get_knowledge_base() -> KnowledgeBase:
+    """設定に基づいて KnowledgeBase インスタンスを返す（シングルトン）。
+
+    KNOWLEDGE_BASE_PROVIDER=vector の場合、初期化失敗時は MockKnowledgeBase にフォールバック。
+    """
+    global _kb_instance
+    if _kb_instance is not None:
+        return _kb_instance
+
+    if KNOWLEDGE_BASE_PROVIDER == "vector":
+        try:
+            _kb_instance = VectorKnowledgeBase()
+        except Exception as e:
+            logger.warning(
+                f"[KnowledgeBase] VectorKnowledgeBase initialization failed, "
+                f"falling back to MockKnowledgeBase: {e}"
+            )
+            _kb_instance = MockKnowledgeBase()
+    else:
+        _kb_instance = MockKnowledgeBase()
+
+    logger.info(f"[KnowledgeBase] Provider: {type(_kb_instance).__name__}")
+    return _kb_instance

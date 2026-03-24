@@ -37,6 +37,12 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-004")
 CHROMA_PERSIST_DIR = os.path.join(os.path.dirname(__file__), "chroma_data")
 
 # ============================================================
+# Knowledge Base 設定
+# ============================================================
+KNOWLEDGE_BASE_PROVIDER = os.environ.get("KNOWLEDGE_BASE_PROVIDER", "mock")
+KB_MAX_SEARCH_DISTANCE = float(os.environ.get("KB_MAX_SEARCH_DISTANCE", "0.8"))
+
+# ============================================================
 # 後方互換: 旧 Vertex AI 設定 (非推奨)
 # ============================================================
 PROJECT_ID = os.environ.get("PROJECT_ID")
