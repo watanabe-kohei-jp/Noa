@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
-const BACKEND_PORT = process.env.BACKEND_PORT || '8001';
-const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8001';
 
 const nextConfig: NextConfig = {
   // 本番ビルド時のみ静的エクスポートを有効にする
