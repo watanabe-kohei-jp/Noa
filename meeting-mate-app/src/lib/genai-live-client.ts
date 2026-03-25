@@ -6,7 +6,9 @@ import {
   LiveClientToolResponse,
   LiveConnectConfig,
   LiveServerContent,
+  LiveServerGoAway,
   LiveServerMessage,
+  LiveServerSessionResumptionUpdate,
   LiveServerToolCall,
   LiveServerToolCallCancellation,
   Part,
@@ -31,6 +33,8 @@ export interface LiveClientEventTypes {
     toolcallCancellation: LiveServerToolCallCancellation
   ) => void;
   turncomplete: () => void;
+  sessionresumptionupdate: (update: LiveServerSessionResumptionUpdate) => void;
+  goaway: (goAway: LiveServerGoAway) => void;
 }
 
 export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
@@ -136,6 +140,8 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
 
   protected onclose(e: CloseEvent) {
     console.log("[GenAILive] WebSocket closed:", e.code, e.reason);
+    this._status = "disconnected";
+    this._session = null;
     this.log(
       `server.close`,
       `disconnected ${e.reason ? `with reason: ${e.reason}` : ``}`
@@ -150,6 +156,17 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
       console.log("[GenAILive] Setup complete!");
       this.log("server.send", "setupComplete");
       this.emit("setupcomplete");
+      return;
+    }
+    if (message.sessionResumptionUpdate) {
+      const { resumable, newHandle } = message.sessionResumptionUpdate;
+      this.log("server.sessionResumptionUpdate", `resumable=${resumable}, hasHandle=${!!newHandle}`);
+      this.emit("sessionresumptionupdate", message.sessionResumptionUpdate);
+      return;
+    }
+    if (message.goAway) {
+      this.log("server.goAway", `timeLeft=${message.goAway.timeLeft}`);
+      this.emit("goaway", message.goAway);
       return;
     }
     if (message.toolCall) {

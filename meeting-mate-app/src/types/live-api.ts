@@ -27,6 +27,9 @@ export type ClientContentLog = {
 // Live API モード
 export type LiveMode = "passive" | "active";
 
+// 接続状態 (reconnecting を含む拡張状態)
+export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
+
 /** page.tsx から Live AI にテキストを送信するための API */
 export interface LivePanelAPI {
   sendText: (text: string) => void;

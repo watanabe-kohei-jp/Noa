@@ -21,7 +21,7 @@ import { AudioRecorder } from "../../lib/audio-recorder";
 import { LiveToolHandler, MeetingContextProvider } from "../../lib/live-tools/tool-handler";
 import { liveToolDeclarations } from "../../lib/live-tools/tool-declarations";
 import { getSystemPrompt } from "../../lib/live-tools/system-prompts";
-import type { LiveMode, LivePanelAPI } from "../../types/live-api";
+import type { ConnectionState, LiveMode, LivePanelAPI } from "../../types/live-api";
 import type { SessionData, TranscriptEntry, TodoItem, Notes } from "../../types/data";
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
@@ -56,7 +56,7 @@ function LivePanelInner({
   currentSessionId,
   onReady,
 }: LivePanelInnerProps) {
-  const { client, setConfig, connected, connect, disconnect, volume } =
+  const { client, setConfig, connected, connectionState, connect, disconnect, volume } =
     useLiveAPIContext();
   const { addTask, updateTask, clear: clearThinkingQueue } = useThinkingQueue();
 
@@ -367,6 +367,12 @@ function LivePanelInner({
         },
       },
       outputAudioTranscription: {},
+      contextWindowCompression: {
+        triggerTokens: "200000",
+        slidingWindow: {
+          targetTokens: "100000",
+        },
+      },
     };
     setConfig(config);
   }, [mode, setConfig]);
@@ -538,33 +544,47 @@ function LivePanelInner({
     setCameraActive(false);
   }, []);
 
-  // Disconnect cleanup (shared between button click and useEffect fallback)
-  const cleanupOnDisconnect = useCallback(() => {
-    abortBrain();                                // 1. in-flight HTTP abort + abortedRef 設定
-    toolHandlerRef.current.resetForDisconnect(); // 2. 世代進行 + active FC 全キャンセル + debounce リセット
-    clearThinkingQueue();                        // 3. UI 即クリア
-    stopTabAudio();                              // 4. Tab audio 停止
-    stopCamera();                                // 5. Camera 停止
-  }, [abortBrain, clearThinkingQueue, stopTabAudio, stopCamera]);
+  // Session cleanup (brain, tool handler, thinking queue — safe during reconnect)
+  const cleanupSession = useCallback(() => {
+    abortBrain();
+    toolHandlerRef.current.resetForDisconnect();
+    clearThinkingQueue();
+  }, [abortBrain, clearThinkingQueue]);
+
+  // Full cleanup (session + media streams — only on final disconnect)
+  const cleanupFull = useCallback(() => {
+    cleanupSession();
+    stopTabAudio();
+    stopCamera();
+  }, [cleanupSession, stopTabAudio, stopCamera]);
 
   const handleDisconnect = useCallback(() => {
-    cleanupOnDisconnect();
-    disconnect();
-  }, [cleanupOnDisconnect, disconnect]);
+    disconnect(); // isManualDisconnect=true set internally → connectionState="disconnected"
+  }, [disconnect]);
 
   const handleConnect = useCallback(() => {
     connect();
   }, [connect]);
 
-  // Fallback cleanup: ネットワーク断・サーバー close・unmount 時にも cleanup を実行
-  const prevConnectedRef = useRef(false);
+  // Unified cleanup: connectionState 遷移に基づき1回だけ実行
+  const prevConnectionStateRef = useRef<ConnectionState>("disconnected");
   useEffect(() => {
-    if (prevConnectedRef.current && !connected) {
-      // handleDisconnect 経由でない切断（ネットワーク断等）をキャッチ
-      cleanupOnDisconnect();
+    const prev = prevConnectionStateRef.current;
+    prevConnectionStateRef.current = connectionState;
+
+    // connected → reconnecting: session cleanup のみ (tab audio 維持)
+    if (prev === "connected" && connectionState === "reconnecting") {
+      cleanupSession();
     }
-    prevConnectedRef.current = connected;
-  }, [connected, cleanupOnDisconnect]);
+    // connected → disconnected: full cleanup (手動切断 or 再接続断念)
+    if (prev === "connected" && connectionState === "disconnected") {
+      cleanupFull();
+    }
+    // reconnecting → disconnected: tab audio も止める (再接続失敗)
+    if (prev === "reconnecting" && connectionState === "disconnected") {
+      stopTabAudio();
+    }
+  }, [connectionState, cleanupSession, cleanupFull, stopTabAudio]);
 
   const startTabAudio = useCallback(async () => {
     try {
@@ -725,6 +745,9 @@ function LivePanelInner({
 
       {/* Live AI indicator */}
       <Sparkles size={14} className="text-yellow-500 flex-shrink-0" />
+      {connectionState === "reconnecting" && (
+        <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse flex-shrink-0" title="再接続中..." />
+      )}
       {connected && (
         <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse flex-shrink-0" />
       )}
@@ -732,17 +755,19 @@ function LivePanelInner({
       {/* Connect / Disconnect */}
       <button
         onClick={connected ? handleDisconnect : handleConnect}
-        disabled={!connected && !sharedStream}
+        disabled={connectionState === "reconnecting" || (!connected && !sharedStream)}
         className={`p-2 rounded-xl transition-all ${
-          connected
-            ? "bg-red-500 hover:bg-red-600 text-white"
-            : !sharedStream
-              ? "bg-gray-300 text-gray-500 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500"
-              : "bg-green-500 hover:bg-green-600 text-white"
+          connectionState === "reconnecting"
+            ? "bg-yellow-500 text-white cursor-wait"
+            : connected
+              ? "bg-red-500 hover:bg-red-600 text-white"
+              : !sharedStream
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed dark:bg-gray-700 dark:text-gray-500"
+                : "bg-green-500 hover:bg-green-600 text-white"
         }`}
-        title={connected ? "Live AI 切断" : !sharedStream ? "先にマイクをONにしてください" : "Live AI 接続"}
+        title={connectionState === "reconnecting" ? "再接続中..." : connected ? "Live AI 切断" : !sharedStream ? "先にマイクをONにしてください" : "Live AI 接続"}
       >
-        {connected ? <PhoneOff size={16} /> : <Phone size={16} />}
+        {connectionState === "reconnecting" ? <Loader2 size={16} className="animate-spin" /> : connected ? <PhoneOff size={16} /> : <Phone size={16} />}
       </button>
 
       {/* Mode toggle */}
