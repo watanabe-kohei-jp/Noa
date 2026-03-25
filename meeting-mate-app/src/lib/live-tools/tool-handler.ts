@@ -98,6 +98,13 @@ export class LiveToolHandler {
     this.pendingCancellations.delete(id);
   }
 
+  // FC 呼び出し履歴（ベースライン測定用）
+  private fcLog: Array<{ timestamp: number; tool: string; request: string }> = [];
+
+  getFcLog() {
+    return this.fcLog;
+  }
+
   async handleToolCall(toolCall: LiveServerToolCall, client: GenAILiveClient) {
     const functionCalls = toolCall.functionCalls || [];
     console.log("[ToolHandler] handleToolCall:", {
@@ -107,7 +114,15 @@ export class LiveToolHandler {
 
     for (const fc of functionCalls) {
       const args = (fc.args as Record<string, string>) || {};
-      console.log("[ToolHandler] FC:", fc.name, "args:", args);
+
+      // 構造化ログ: FC 呼び出しを記録（自発的 FC 測定用）
+      this.fcLog.push({
+        timestamp: Date.now(),
+        tool: fc.name || "unknown",
+        request: args.request || args.category || "",
+      });
+      console.log("[ToolHandler] FC:", fc.name, "args:", args,
+        `(total FC calls: ${this.fcLog.length})`);
 
       if (fc.name === "delegate_to_brain") {
         await this.handleDelegateToBrainProgressive(

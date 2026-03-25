@@ -10,6 +10,8 @@ import {
   ToggleRight,
   Sparkles,
   Loader2,
+  Camera,
+  CameraOff,
 } from "lucide-react";
 import ImageAttachmentButton from "./ImageAttachmentButton";
 import ImagePreviewOverlay from "./ImagePreviewOverlay";
@@ -86,10 +88,15 @@ function LivePanelInner({
   const [inVolume, setInVolume] = useState(0);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [tabAudioActive, setTabAudioActive] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
   const [audioRecorder] = useState(() => new AudioRecorder());
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const tabStreamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
+  const cameraTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Brain hook (delegate_to_brain meta-tool)
   const thinkingQueue = useMemo(() => ({ addTask, updateTask }), [addTask, updateTask]);
@@ -519,6 +526,24 @@ function LivePanelInner({
     setTabAudioActive(false);
   }, []);
 
+  // Camera capture
+  const stopCamera = useCallback(() => {
+    if (cameraTimerRef.current) {
+      clearTimeout(cameraTimerRef.current);
+      cameraTimerRef.current = null;
+    }
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.pause();
+      cameraVideoRef.current.srcObject = null;
+    }
+    cameraStreamRef.current?.getTracks().forEach((t) => {
+      t.onended = null;
+      t.stop();
+    });
+    cameraStreamRef.current = null;
+    setCameraActive(false);
+  }, []);
+
   // Session cleanup (brain, tool handler, thinking queue — safe during reconnect)
   const cleanupSession = useCallback(() => {
     abortBrain();
@@ -530,7 +555,8 @@ function LivePanelInner({
   const cleanupFull = useCallback(() => {
     cleanupSession();
     stopTabAudio();
-  }, [cleanupSession, stopTabAudio]);
+    stopCamera();
+  }, [cleanupSession, stopTabAudio, stopCamera]);
 
   const handleDisconnect = useCallback(() => {
     disconnect(); // isManualDisconnect=true set internally → connectionState="disconnected"
@@ -639,6 +665,48 @@ function LivePanelInner({
     }
   }, [connected, client, stopTabAudio]);
 
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
+      });
+
+      cameraStreamRef.current = stream;
+      setCameraActive(true);
+
+      const video = cameraVideoRef.current;
+      const canvas = cameraCanvasRef.current;
+      if (!video || !canvas) return;
+
+      video.srcObject = new MediaStream(stream.getVideoTracks());
+      await video.play();
+
+      const sendFrame = () => {
+        if (!connected || cameraStreamRef.current !== stream) return;
+        if (!canvas || !video) return;
+
+        canvas.width = video.videoWidth * 0.25;
+        canvas.height = video.videoHeight * 0.25;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const base64 = canvas.toDataURL("image/jpeg", 0.5);
+        const data = base64.slice(base64.indexOf(",") + 1);
+        client.sendRealtimeInput([{ mimeType: "image/jpeg", data }]);
+
+        cameraTimerRef.current = setTimeout(sendFrame, 2000); // 0.5 FPS
+      };
+      sendFrame();
+
+      stream.getTracks().forEach((track) => {
+        track.onended = () => stopCamera();
+      });
+    } catch (err) {
+      console.error("[LivePanel] Camera capture failed:", err);
+    }
+  }, [connected, client, stopCamera]);
+
   const toggleMode = () => {
     setMode((prev) => (prev === "passive" ? "active" : "passive"));
   };
@@ -670,6 +738,10 @@ function LivePanelInner({
       {/* Hidden elements for tab capture */}
       <video ref={videoRef} className="hidden" playsInline />
       <canvas ref={canvasRef} className="hidden" />
+
+      {/* Hidden elements for camera capture */}
+      <video ref={cameraVideoRef} className="hidden" playsInline muted />
+      <canvas ref={cameraCanvasRef} className="hidden" />
 
       {/* Live AI indicator */}
       <Sparkles size={14} className="text-yellow-500 flex-shrink-0" />
@@ -747,6 +819,21 @@ function LivePanelInner({
           title={tabAudioActive ? "タブ音声停止" : "タブ音声キャプチャ"}
         >
           {tabAudioActive ? <MonitorOff size={16} /> : <MonitorUp size={16} />}
+        </button>
+      )}
+
+      {/* Camera capture */}
+      {connected && (
+        <button
+          onClick={cameraActive ? stopCamera : startCamera}
+          className={`p-2 rounded-xl transition ${
+            cameraActive
+              ? "bg-sky-100 text-sky-600 dark:bg-sky-900/30 dark:text-sky-400"
+              : "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300"
+          }`}
+          title={cameraActive ? "カメラ停止" : "カメラ映像を送信"}
+        >
+          {cameraActive ? <CameraOff size={16} /> : <Camera size={16} />}
         </button>
       )}
 
