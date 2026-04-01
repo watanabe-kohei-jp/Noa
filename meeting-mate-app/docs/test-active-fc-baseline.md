@@ -12,7 +12,7 @@
 ## テスト条件
 
 - モード: **Active**
-- 接続: Gemini Live API (gemini-2.5-flash-native-audio-preview)
+- 接続: Gemini Live API (gemini-3.1-flash-live-preview)
 - 時間: 約5分間
 - **prompt は現状のまま変更しない**（能力の限界を測定するため）
 
