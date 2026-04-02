@@ -3,6 +3,7 @@ import { GripVertical, EyeOff } from 'lucide-react';
 import { getPanelConfig } from '@/app/room/constants/panelConfig';
 import { themes } from '@/constants/themes';
 import { ParticipantEntry, NoteItem, TodoItem, CurrentAgenda, OverviewDiagramData, PanelId, TranscriptEntry } from '@/types/data';
+import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
 import ExportDropdown from '@/components/export/ExportDropdown';
 import type { ExportOption } from '@/components/export/ExportDropdown';
 
@@ -31,6 +32,8 @@ interface PanelProps {
   dragged: PanelId | null;
   /** パネル個別エクスポートのオプション */
   exportOptions?: ExportOption[];
+  /** Mermaid 図エクスポート用 ref */
+  diagramRef?: React.RefObject<MermaidDiagramHandle | null>;
 }
 
 const Panel = ({
@@ -57,10 +60,11 @@ const Panel = ({
   onParticipantLeave,
   dragged,
   exportOptions,
+  diagramRef,
 }: PanelProps) => {
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave, diagramRef),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave, diagramRef]
   );
 
   const cfg = panelConfig[id];

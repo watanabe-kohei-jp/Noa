@@ -729,6 +729,7 @@ export default function RoomPage() {
                       }}
                       dragged={dragged}
                       exportOptions={getExportOptions(pid)}
+                      diagramRef={pid === 'overviewDiagram' ? diagramRef : undefined}
                     />
                     {dragged && <DropZone col={cIdx} pos={i + 1} />}
                   </div>
