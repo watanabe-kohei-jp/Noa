@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ref, onValue, set, push, get } from 'firebase/database';
 import { database as db } from '@/firebase';
-import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession } from '@/types/data';
+import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession, CalendarLinkItem } from '@/types/data';
 import { useAuth } from '@/contexts/AuthContext';
 
 interface UseRoomDataResult {
@@ -17,6 +17,7 @@ interface UseRoomDataResult {
   projectSubtitle: string;
   meetingDate: string;
   overviewDiagramData: OverviewDiagramData | null;
+  calendarLinks: CalendarLinkItem[];
   ownerUid: string | null;
   joinRequests: { [uid: string]: { name: string; requestedAt: string } };
   isLoading: boolean;
@@ -49,6 +50,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
   const [projectSubtitle, setProjectSubtitle] = useState<string>("会議サブタイトル");
   const [meetingDate, setMeetingDate] = useState<string>(new Date().toLocaleDateString('ja-JP'));
   const [overviewDiagramData, setOverviewDiagramData] = useState<OverviewDiagramData | null>(null);
+  const [calendarLinks, setCalendarLinks] = useState<CalendarLinkItem[]>([]);
   const [ownerUid, setOwnerUid] = useState<string | null>(null);
   const [joinRequests, setJoinRequests] = useState<{ [uid: string]: { name: string; requestedAt: string } }>({});
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -86,6 +88,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       setProjectSubtitle("会議サブタイトル");
       setMeetingDate(new Date().toLocaleDateString('ja-JP'));
       setOverviewDiagramData(null);
+      setCalendarLinks([]);
       setOwnerUid(null);
       setJoinRequests({});
       setApiKeyExpiresAt(null);
@@ -243,6 +246,12 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     } else {
       setOverviewDiagramData(null);
     }
+
+    if (data.calendarLinks && typeof data.calendarLinks === 'object') {
+      setCalendarLinks(Object.values(data.calendarLinks) as CalendarLinkItem[]);
+    } else {
+      setCalendarLinks([]);
+    }
   }, []);
 
   // セッションレベルデータのリスナー
@@ -253,6 +262,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     setNotes([]);
     setCurrentAgenda(null);
     setSuggestedNextTopics([]);
+    setCalendarLinks([]);
     setOverviewDiagramData(null);
 
     if (!roomId || !currentSessionId) return;
@@ -338,6 +348,12 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
         setOverviewDiagramData(data.overviewDiagram as OverviewDiagramData);
       } else {
         setOverviewDiagramData(null);
+      }
+
+      if (data.calendarLinks && typeof data.calendarLinks === 'object') {
+        setCalendarLinks(Object.values(data.calendarLinks) as CalendarLinkItem[]);
+      } else {
+        setCalendarLinks([]);
       }
     });
 
@@ -490,6 +506,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     projectSubtitle,
     meetingDate,
     overviewDiagramData,
+    calendarLinks,
     ownerUid,
     joinRequests,
     isLoading,

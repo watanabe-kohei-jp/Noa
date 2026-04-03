@@ -133,6 +133,26 @@ function LivePanelInner({
         mermaidDefinition: mermaidCode,
       });
     },
+    onCalendarLink: (link: { calendarUrl: string; summary: string; start: string; end: string; timezone: string; description?: string; location?: string }) => {
+      if (!roomId || !link.calendarUrl) return;
+      const db = getDatabase();
+      if (!db) return;
+      const linkId = Date.now().toString() + Math.random().toString(36).substring(2, 8);
+      const path = currentSessionId
+        ? `rooms/${roomId}/sessions/${currentSessionId}/calendarLinks/${linkId}`
+        : `rooms/${roomId}/calendarLinks/${linkId}`;
+      set(ref(db, path), {
+        id: linkId,
+        summary: link.summary,
+        startAt: link.start,
+        endAt: link.end,
+        timezone: link.timezone,
+        description: link.description || "",
+        location: link.location || "",
+        googleCalendarUrl: link.calendarUrl,
+        createdAt: new Date().toISOString(),
+      });
+    },
   }), [roomId, currentSessionId]);
   const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
 

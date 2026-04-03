@@ -97,6 +97,7 @@ export default function RoomPage() {
   projectTitle,
   projectSubtitle,
   overviewDiagramData,
+  calendarLinks,
   pageCurrentUser,
     transcript,
     apiKeyExpiresAt,
@@ -552,8 +553,8 @@ export default function RoomPage() {
   }, []);
 
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave]
+    getPanelConfig(participants, notes, tasks, calendarLinks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave),
+    [participants, notes, tasks, calendarLinks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave]
   );
 
   // zoomPanelIdが設定されたらモーダルを表示
@@ -632,6 +633,7 @@ export default function RoomPage() {
                       transcripts={transcript}
                       notes={notes}
                       tasks={tasks}
+                      calendarLinks={calendarLinks}
                       currentAgenda={currentAgenda}
                       suggestedNextTopics={suggestedNextTopics}
                       overviewDiagramData={overviewDiagramData}

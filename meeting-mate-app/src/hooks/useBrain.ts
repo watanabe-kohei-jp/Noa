@@ -18,6 +18,15 @@ interface BrainCallbacks {
     priority?: string;
   }) => void;
   onDiagram?: (mermaidCode: string, title: string) => void;
+  onCalendarLink?: (link: {
+    calendarUrl: string;
+    summary: string;
+    start: string;
+    end: string;
+    timezone: string;
+    description?: string;
+    location?: string;
+  }) => void;
 }
 
 /** ThinkingQueue にイベントを発行するためのコールバック */
@@ -175,6 +184,17 @@ export function useBrain(
                 (action.data.mermaid_code as string) || "",
                 (action.data.title as string) || ""
               );
+            }
+            if (action.action === "calendar_link" && action.data) {
+              callbacksRef.current?.onCalendarLink?.({
+                calendarUrl: (action.data.calendar_url as string) || "",
+                summary: (action.data.summary as string) || "",
+                start: (action.data.start as string) || "",
+                end: (action.data.end as string) || "",
+                timezone: (action.data.timezone as string) || "Asia/Tokyo",
+                description: action.data.description as string | undefined,
+                location: action.data.location as string | undefined,
+              });
             }
           }
         }

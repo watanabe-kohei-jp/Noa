@@ -2,7 +2,7 @@ import React from 'react';
 import { GripVertical, EyeOff } from 'lucide-react';
 import { getPanelConfig } from '@/app/room/constants/panelConfig';
 import { themes } from '@/constants/themes';
-import { ParticipantEntry, NoteItem, TodoItem, CurrentAgenda, OverviewDiagramData, PanelId, TranscriptEntry } from '@/types/data';
+import { ParticipantEntry, NoteItem, TodoItem, CurrentAgenda, OverviewDiagramData, PanelId, TranscriptEntry, CalendarLinkItem } from '@/types/data';
 
 interface PanelProps {
   id: PanelId;
@@ -11,6 +11,7 @@ interface PanelProps {
   transcripts: TranscriptEntry[];
   notes: NoteItem[];
   tasks: TodoItem[];
+  calendarLinks: CalendarLinkItem[];
   currentAgenda: CurrentAgenda | null; // null を許容
   suggestedNextTopics: string[];
   overviewDiagramData: OverviewDiagramData | null; // null を許容
@@ -36,6 +37,7 @@ const Panel = ({
   transcripts,
   notes,
   tasks,
+  calendarLinks,
   currentAgenda,
   suggestedNextTopics,
   overviewDiagramData,
@@ -54,8 +56,8 @@ const Panel = ({
   dragged,
 }: PanelProps) => {
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave]
+    getPanelConfig(participants, notes, tasks, calendarLinks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave),
+    [participants, notes, tasks, calendarLinks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave]
   );
 
   const cfg = panelConfig[id];

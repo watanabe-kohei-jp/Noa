@@ -110,11 +110,12 @@ class GenerateDiagramRetryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ToolRegistryTests(unittest.TestCase):
-    def test_all_9_builtin_tools_registered(self):
+    def test_all_builtin_tools_registered(self):
         expected = {
             "knowledge_base_search", "calculate", "get_current_time",
             "get_meeting_context", "summarize_discussion", "create_task",
             "generate_diagram", "search_past_meetings", "deep_analysis",
+            "google_calendar_create",
         }
         self.assertEqual(set(registry.tool_names), expected)
 
@@ -126,7 +127,7 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertEqual(registry.get_follow_up_allowed(), expected)
 
     def test_follow_up_excludes_write_tools(self):
-        disallowed = {"create_task", "generate_diagram", "deep_analysis"}
+        disallowed = {"create_task", "generate_diagram", "deep_analysis", "google_calendar_create"}
         allowed = registry.get_follow_up_allowed()
         self.assertTrue(disallowed.isdisjoint(allowed))
 
@@ -154,6 +155,93 @@ class ExecuteToolRegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_tool_returns_error(self):
         result = await execute_tool("nonexistent_tool", {}, {})
         self.assertIn("error", result)
+
+
+class GoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generates_valid_url(self):
+        result = await execute_tool("google_calendar_create", {
+            "summary": "定例会議",
+            "start": "2026-04-03T15:00",
+            "end": "2026-04-03T16:00",
+        }, {})
+        self.assertTrue(result["success"])
+        self.assertIn("calendar.google.com", result["calendar_url"])
+        self.assertIn("action=TEMPLATE", result["calendar_url"])
+        self.assertIn("20260403T150000", result["calendar_url"])
+        self.assertIn("20260403T160000", result["calendar_url"])
+        self.assertIn("ctz=Asia/Tokyo", result["calendar_url"])
+
+    async def test_url_encodes_summary(self):
+        result = await execute_tool("google_calendar_create", {
+            "summary": "プロジェクト レビュー",
+            "start": "2026-04-03T10:00",
+            "end": "2026-04-03T11:00",
+        }, {})
+        self.assertTrue(result["success"])
+        self.assertIn("calendar_url", result)
+
+    async def test_includes_optional_fields(self):
+        result = await execute_tool("google_calendar_create", {
+            "summary": "ランチ",
+            "start": "2026-04-03T12:00",
+            "end": "2026-04-03T13:00",
+            "description": "チームランチ",
+            "location": "カフェ",
+        }, {})
+        self.assertTrue(result["success"])
+        self.assertIn("details=", result["calendar_url"])
+        self.assertIn("location=", result["calendar_url"])
+
+    async def test_rejects_missing_summary(self):
+        result = await execute_tool("google_calendar_create", {
+            "start": "2026-04-03T15:00",
+            "end": "2026-04-03T16:00",
+        }, {})
+        self.assertFalse(result["success"])
+
+    async def test_rejects_missing_times(self):
+        result = await execute_tool("google_calendar_create", {
+            "summary": "会議",
+        }, {})
+        self.assertFalse(result["success"])
+
+    async def test_rejects_end_before_start(self):
+        result = await execute_tool("google_calendar_create", {
+            "summary": "会議",
+            "start": "2026-04-03T16:00",
+            "end": "2026-04-03T15:00",
+        }, {})
+        self.assertFalse(result["success"])
+
+    async def test_rejects_invalid_datetime(self):
+        result = await execute_tool("google_calendar_create", {
+            "summary": "会議",
+            "start": "not-a-date",
+            "end": "also-not-a-date",
+        }, {})
+        self.assertFalse(result["success"])
+
+
+class CalendarLinkExtractActionsTests(unittest.TestCase):
+    def test_extracts_calendar_link_action(self):
+        result = {
+            "success": True,
+            "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=test",
+            "summary": "テスト会議",
+            "start": "2026-04-03T15:00",
+            "end": "2026-04-03T16:00",
+            "timezone": "Asia/Tokyo",
+        }
+        actions = extract_actions("google_calendar_create", result)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action"], "calendar_link")
+        self.assertEqual(actions[0]["data"]["summary"], "テスト会議")
+        self.assertIn("calendar_url", actions[0]["data"])
+
+    def test_no_action_on_failure(self):
+        result = {"success": False, "message": "エラー"}
+        actions = extract_actions("google_calendar_create", result)
+        self.assertEqual(actions, [])
 
 
 if __name__ == "__main__":

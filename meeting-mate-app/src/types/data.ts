@@ -64,7 +64,19 @@ export interface MeetingSession {
   status: "active" | "ended";
 }
 
-export type PanelId = "participants" | "currentAgenda" | "suggestedTopics" | "overviewDiagram" | "notes" | "tasks" | "conversationHistory";
+export type CalendarLinkItem = {
+  id: string;
+  summary: string;
+  startAt: string;
+  endAt: string;
+  timezone: string;
+  description?: string;
+  location?: string;
+  googleCalendarUrl: string;
+  createdAt: string;
+};
+
+export type PanelId = "participants" | "currentAgenda" | "suggestedTopics" | "overviewDiagram" | "notes" | "tasks" | "conversationHistory" | "calendarLinks";
 
 // SpeechRecognition types
 export interface SpeechRecognitionErrorEvent extends Event {

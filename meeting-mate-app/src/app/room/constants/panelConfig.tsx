@@ -1,13 +1,14 @@
 import React from 'react';
-import { Users, GitBranch, CheckSquare, Network, ClipboardList, BookOpen, MessageSquare } from 'lucide-react';
+import { Users, GitBranch, CheckSquare, Network, ClipboardList, BookOpen, MessageSquare, CalendarPlus } from 'lucide-react';
 import ParticipantsList from '@/app/room/components/ParticipantsList';
 import NotesDisplay from '@/app/room/components/NotesDisplay';
 import TasksPanel from '@/app/room/components/TasksPanel';
+import CalendarLinksPanel from '@/app/room/components/CalendarLinksPanel';
 import OverviewDiagramPanel from '@/app/room/components/OverviewDiagramPanel';
 import CurrentAgendaDisplayPanel from '@/app/room/components/CurrentAgendaDisplayPanel';
 import SuggestedNextTopicsPanel from '@/app/room/components/SuggestedNextTopicsPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
-import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry } from '@/types/data';
+import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, CalendarLinkItem } from '@/types/data';
 import { themes } from '@/constants/themes';
 
 type PanelConfig = {
@@ -31,6 +32,7 @@ export const getPanelConfig = (
   participants: ParticipantEntry[],
   notes: Notes,
   tasks: TodoItem[],
+  calendarLinks: CalendarLinkItem[],
   currentAgenda: CurrentAgenda | null,
   suggestedNextTopics: string[],
   overviewDiagramData: OverviewDiagramData | null,
@@ -70,6 +72,11 @@ export const getPanelConfig = (
     title: 'タスク',
     icon: CheckSquare,
     content: <TasksPanel tasks={tasks} currentTheme={currentTheme} />
+  },
+  calendarLinks: {
+    title: 'カレンダー',
+    icon: CalendarPlus,
+    content: <CalendarLinksPanel calendarLinks={calendarLinks} currentTheme={currentTheme} />
   },
   conversationHistory: {
     title: '会話履歴',

@@ -12,7 +12,8 @@ import json
 import logging
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timezone as tz
+from urllib.parse import quote
 
 from config import BRAIN_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAULT_GEMINI_API_KEY, get_default_api_key
 from knowledge_base import get_knowledge_base
@@ -496,8 +497,61 @@ async def _handle_deep_analysis(args: dict, meeting_context: dict) -> dict:
     )
 
 
+async def _handle_google_calendar_create(args: dict, meeting_context: dict) -> dict:
+    summary = args.get("summary", "").strip()
+    if not summary:
+        return {"success": False, "message": "予定のタイトルが必要です。"}
+
+    start_str = args.get("start", "")
+    end_str = args.get("end", "")
+    if not start_str or not end_str:
+        return {"success": False, "message": "開始時刻と終了時刻の両方が必要です。もう一度お伝えください。"}
+
+    # ISO8601 strict parse
+    try:
+        start_dt = datetime.fromisoformat(start_str)
+        end_dt = datetime.fromisoformat(end_str)
+    except (ValueError, TypeError):
+        return {"success": False, "message": "日時の形式が正しくありません。「2026-04-03T15:00」のような形式でお伝えください。"}
+
+    if end_dt <= start_dt:
+        return {"success": False, "message": "終了時刻は開始時刻より後にしてください。"}
+
+    # Google Calendar URL 用フォーマット: YYYYMMDDTHHmmss
+    fmt = "%Y%m%dT%H%M%S"
+    dates_param = f"{start_dt.strftime(fmt)}/{end_dt.strftime(fmt)}"
+
+    # URL 組み立て
+    params = [
+        ("action", "TEMPLATE"),
+        ("text", summary),
+        ("dates", dates_param),
+        ("ctz", "Asia/Tokyo"),
+    ]
+    description = args.get("description", "")
+    if description:
+        params.append(("details", description))
+    location = args.get("location", "")
+    if location:
+        params.append(("location", location))
+
+    query_string = "&".join(f"{k}={quote(str(v), safe='/')}" for k, v in params)
+    calendar_url = f"https://calendar.google.com/calendar/render?{query_string}"
+
+    return {
+        "success": True,
+        "calendar_url": calendar_url,
+        "summary": summary,
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "timezone": "Asia/Tokyo",
+        "description": description,
+        "location": location,
+    }
+
+
 # ================================================================
-# Tool Registration (既存9ツール)
+# Tool Registration (既存9ツール + google_calendar_create)
 # ================================================================
 
 def _register_builtin_tools() -> None:
@@ -568,6 +622,14 @@ def _register_builtin_tools() -> None:
             follow_up_allowed=True,
         ),
         ToolDefinition(
+            name="google_calendar_create",
+            description="Google Calendar に予定を追加するリンクを生成（参加者全員に共有される）",
+            args_description='{{ "summary": "予定名", "start": "YYYY-MM-DDTHH:MM (例: 2026-04-03T15:00)", "end": "YYYY-MM-DDTHH:MM", "description": "詳細(任意)", "location": "場所(任意)" }}',
+            handler=_handle_google_calendar_create,
+            read_only=False,
+            follow_up_allowed=False,
+        ),
+        ToolDefinition(
             name="deep_analysis",
             description=(
                 "以下のいずれかに該当する質問に使用:\n"
@@ -607,6 +669,19 @@ def extract_actions(tool_name: str, tool_result: dict) -> list[dict]:
                 "mermaid_code": tool_result.get("mermaid_code", ""),
                 "description": tool_result.get("description", ""),
                 "title": tool_result.get("title", "会議の概要図"),
+            },
+        })
+    if tool_name == "google_calendar_create" and tool_result.get("success"):
+        actions.append({
+            "action": "calendar_link",
+            "data": {
+                "calendar_url": tool_result["calendar_url"],
+                "summary": tool_result["summary"],
+                "start": tool_result["start"],
+                "end": tool_result["end"],
+                "timezone": tool_result.get("timezone", "Asia/Tokyo"),
+                "description": tool_result.get("description", ""),
+                "location": tool_result.get("location", ""),
             },
         })
     return actions
