@@ -23,6 +23,12 @@ import Panel from '@/app/room/components/Panel';
 import OverviewDiagramPanel from '@/app/room/components/OverviewDiagramPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import { participantColors, getParticipantColorIndex } from '@/app/room/components/ParticipantsList';
+import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
+import { exportDiagramAsSvg, exportDiagramAsPng, exportDiagramAsPdf, exportTextData } from '@/lib/export';
+import type { ExportOption } from '@/components/export/ExportDropdown';
+import ExportButton from '@/components/export/ExportButton';
+import ExportDialog from '@/components/export/ExportDialog';
+import type { ReportData } from '@/lib/export/report-formatter';
 
 // 型定義とユーティリティ関数のインポート
 import {
@@ -69,6 +75,12 @@ export default function RoomPage() {
   const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'modern'>('light'); // デフォルトはライトテーマ
   const [modalContent, setModalContent] = useState<{ title: string; children: React.ReactNode; panelId?: PanelId } | null>(null);
   const [processingAgents, setProcessingAgents] = useState<string[]>([]); // 処理中のエージェント名
+
+  // Mermaid 図エクスポート用 ref
+  const diagramRef = useRef<MermaidDiagramHandle>(null);
+
+  // 一括エクスポートダイアログ
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
 
   // クライアントサイドでroomIdを取得
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -552,9 +564,68 @@ export default function RoomPage() {
   }, []);
 
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave),
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, diagramRef),
     [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave]
   );
+
+  // パネルごとのエクスポートオプションを生成
+  const getExportOptions = useCallback((panelId: PanelId): ExportOption[] => {
+    const sessionName = sessions.find(s => s.id === currentSessionId)?.name;
+    const makeTextOptions = (target: 'transcript' | 'tasks' | 'notes' | 'agenda' | 'suggestedTopics', formats: Array<'markdown' | 'csv' | 'json'>): ExportOption[] => {
+      const data = { transcript, tasks, notes, currentAgenda, suggestedNextTopics };
+      const labels: Record<string, string> = { markdown: 'Markdown', csv: 'CSV', json: 'JSON' };
+      return formats.map(f => ({
+        label: `${labels[f]} でダウンロード`,
+        format: f,
+        onClick: () => exportTextData(target, f, data, sessionName),
+      }));
+    };
+
+    switch (panelId) {
+      case 'overviewDiagram': {
+        if (!overviewDiagramData?.mermaidDefinition) return [];
+        const title = overviewDiagramData.title;
+        return [
+          {
+            label: 'SVG でダウンロード',
+            format: 'svg',
+            onClick: () => {
+              const def = diagramRef.current?.getProcessedDefinition();
+              if (def) return exportDiagramAsSvg(def, currentTheme, title);
+            },
+          },
+          {
+            label: 'PNG でダウンロード',
+            format: 'png',
+            onClick: () => {
+              const container = diagramRef.current?.getContainer();
+              if (container) return exportDiagramAsPng(container, currentTheme, title);
+            },
+          },
+          {
+            label: 'PDF でダウンロード',
+            format: 'pdf',
+            onClick: () => {
+              const container = diagramRef.current?.getContainer();
+              if (container) return exportDiagramAsPdf(container, currentTheme, title);
+            },
+          },
+        ];
+      }
+      case 'tasks':
+        return tasks.length > 0 ? makeTextOptions('tasks', ['markdown', 'csv', 'json']) : [];
+      case 'notes':
+        return notes.length > 0 ? makeTextOptions('notes', ['markdown', 'csv', 'json']) : [];
+      case 'conversationHistory':
+        return transcript.length > 0 ? makeTextOptions('transcript', ['markdown', 'json']) : [];
+      case 'currentAgenda':
+        return currentAgenda?.mainTopic ? makeTextOptions('agenda', ['markdown', 'json']) : [];
+      case 'suggestedTopics':
+        return suggestedNextTopics.length > 0 ? makeTextOptions('suggestedTopics', ['markdown', 'json']) : [];
+      default:
+        return [];
+    }
+  }, [overviewDiagramData, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId]);
 
   // zoomPanelIdが設定されたらモーダルを表示
   useEffect(() => {
@@ -657,6 +728,8 @@ export default function RoomPage() {
                         }
                       }}
                       dragged={dragged}
+                      exportOptions={getExportOptions(pid)}
+                      diagramRef={pid === 'overviewDiagram' ? diagramRef : undefined}
                     />
                     {dragged && <DropZone col={cIdx} pos={i + 1} />}
                   </div>
@@ -732,6 +805,7 @@ export default function RoomPage() {
                 }
               }}
               dragged={dragged}
+              exportOptions={getExportOptions(pid)}
             />
             {dragged && <DropZone col={0} pos={i + 1} />}
           </Fragment>
@@ -904,6 +978,7 @@ export default function RoomPage() {
                 </div>
               </div>
             </div>
+            <ExportButton onClick={() => setIsExportDialogOpen(true)} currentTheme={selectedTheme} />
             <button
               onClick={toggleTheme}
               className={`p-3 rounded-lg border transition-all duration-200 ${
@@ -1121,6 +1196,24 @@ export default function RoomPage() {
           />
         </div>
       )}
+
+      {/* 一括エクスポートダイアログ */}
+      <ExportDialog
+        isOpen={isExportDialogOpen}
+        onClose={() => setIsExportDialogOpen(false)}
+        currentTheme={selectedTheme}
+        reportData={{
+          sessionName: sessions.find(s => s.id === currentSessionId)?.name,
+          roomTitle: projectTitle,
+          exportedAt: new Date().toLocaleString('ja-JP'),
+          transcript,
+          tasks,
+          notes,
+          currentAgenda,
+          suggestedNextTopics,
+          overviewDiagram: overviewDiagramData,
+        } as ReportData}
+      />
     </div>
   );
 }

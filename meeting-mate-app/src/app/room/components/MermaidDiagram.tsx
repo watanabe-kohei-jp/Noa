@@ -1,10 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import * as d3 from 'd3';
 import { generateUniqueId } from '@/types/data';
 
 interface MermaidDiagramProps {
   definition: string;
   theme?: 'light' | 'dark' | 'modern';
+}
+
+/** MermaidDiagram の外部公開 API */
+export interface MermaidDiagramHandle {
+  /** SVG を含むコンテナ要素 */
+  getContainer: () => HTMLDivElement | null;
+  /** 前処理済みの Mermaid 定義テキスト */
+  getProcessedDefinition: () => string;
 }
 
 // Supported diagram type prefixes
@@ -239,12 +247,17 @@ const cleanMermaidDefinition = (definition: string): string => {
   return result;
 };
 
-const MermaidDiagram: React.FC<MermaidDiagramProps> = React.memo(({ definition, theme = 'light' }) => {
+const MermaidDiagram = forwardRef<MermaidDiagramHandle, MermaidDiagramProps>(({ definition, theme = 'light' }, ref) => {
   const mermaidContainerRef = useRef<HTMLDivElement>(null);
   const [svgContent, setSvgContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [diagramId] = useState<string>(`mermaid-diagram-${generateUniqueId()}`);
   const [processedDefinition, setProcessedDefinition] = useState<string>("");
+
+  useImperativeHandle(ref, () => ({
+    getContainer: () => mermaidContainerRef.current,
+    getProcessedDefinition: () => processedDefinition,
+  }), [processedDefinition]);
 
   useEffect(() => {
     console.log("MermaidDiagram: Raw definition received:", definition);
@@ -426,4 +439,4 @@ const MermaidDiagram: React.FC<MermaidDiagramProps> = React.memo(({ definition, 
 });
 MermaidDiagram.displayName = 'MermaidDiagram';
 
-export default MermaidDiagram;
+export default React.memo(MermaidDiagram);

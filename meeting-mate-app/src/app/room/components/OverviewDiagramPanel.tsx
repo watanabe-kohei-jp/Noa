@@ -1,20 +1,23 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { GitBranch } from 'lucide-react';
 import { themes } from '@/constants/themes';
 import { OverviewDiagramData } from '@/types/data';
-import MermaidDiagram from './MermaidDiagram'; // 後で作成
+import MermaidDiagram from './MermaidDiagram';
+import type { MermaidDiagramHandle } from './MermaidDiagram';
 
 interface OverviewDiagramPanelProps {
   diagramData: OverviewDiagramData | null;
   currentTheme: typeof themes.dark;
   themeType: 'light' | 'dark' | 'modern';
   isFullScreen?: boolean;
+  /** 外部から MermaidDiagram の handle にアクセスするための ref */
+  diagramRef?: React.RefObject<MermaidDiagramHandle | null>;
 }
 
-const OverviewDiagramPanel: React.FC<OverviewDiagramPanelProps> = React.memo(({ diagramData, currentTheme, themeType, isFullScreen = false }) => {
-  console.log("OverviewDiagramPanel: diagramData received:", diagramData);
-  console.log("OverviewDiagramPanel: mermaidDefinition:", diagramData?.mermaidDefinition);
-  
+const OverviewDiagramPanel: React.FC<OverviewDiagramPanelProps> = React.memo(({ diagramData, currentTheme, themeType, isFullScreen = false, diagramRef }) => {
+  const internalRef = useRef<MermaidDiagramHandle>(null);
+  const ref = diagramRef || internalRef;
+
   if (!diagramData || !diagramData.mermaidDefinition) {
     return (
       <div className={`${isFullScreen ? 'w-full h-full' : `${currentTheme.cardInner} border rounded-xl p-4`} flex items-center justify-center`} style={isFullScreen ? {} : { minHeight: '200px' }}>
@@ -29,7 +32,7 @@ const OverviewDiagramPanel: React.FC<OverviewDiagramPanelProps> = React.memo(({ 
   }
   return (
     <div className={`${isFullScreen ? 'w-full h-full' : `${currentTheme.cardInner} border rounded-xl p-4`} flex items-center justify-center`} style={isFullScreen ? {} : { minHeight: '200px' }}>
-      <MermaidDiagram definition={diagramData.mermaidDefinition} theme={themeType} />
+      <MermaidDiagram ref={ref} definition={diagramData.mermaidDefinition} theme={themeType} />
     </div>
   );
 });

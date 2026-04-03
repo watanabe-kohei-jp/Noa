@@ -8,13 +8,17 @@ import CurrentAgendaDisplayPanel from '@/app/room/components/CurrentAgendaDispla
 import SuggestedNextTopicsPanel from '@/app/room/components/SuggestedNextTopicsPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry } from '@/types/data';
+import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
 import { themes } from '@/constants/themes';
+
+export type ExportFormat = 'svg' | 'png' | 'pdf' | 'markdown' | 'csv' | 'json';
 
 type PanelConfig = {
   [key in PanelId]: {
     title: string;
     icon: React.ElementType;
     content: React.ReactNode;
+    exportFormats: ExportFormat[];
   };
 };
 
@@ -39,41 +43,49 @@ export const getPanelConfig = (
   chatHistory: ChatHistoryItem[],
   transcripts: TranscriptEntry[],
   onParticipantEnter: (id: string) => void,
-  onParticipantLeave: (id: string) => void
+  onParticipantLeave: (id: string) => void,
+  diagramRef?: React.RefObject<MermaidDiagramHandle | null>,
 ): PanelConfig => ({
   participants: {
     title: '参加者',
     icon: Users,
-    content: <ParticipantsList participants={participants} transcripts={transcripts} currentTheme={currentTheme} onParticipantEnter={onParticipantEnter} onParticipantLeave={onParticipantLeave} />
+    content: <ParticipantsList participants={participants} transcripts={transcripts} currentTheme={currentTheme} onParticipantEnter={onParticipantEnter} onParticipantLeave={onParticipantLeave} />,
+    exportFormats: [],
   },
   currentAgenda: {
     title: '現在の議題',
     icon: ClipboardList,
-    content: <CurrentAgendaDisplayPanel agenda={currentAgenda} currentTheme={currentTheme} />
+    content: <CurrentAgendaDisplayPanel agenda={currentAgenda} currentTheme={currentTheme} />,
+    exportFormats: ['markdown', 'json'],
   },
   suggestedTopics: {
     title: '提案される次の議題',
     icon: GitBranch,
-    content: <SuggestedNextTopicsPanel topics={suggestedNextTopics} currentTheme={currentTheme} />
+    content: <SuggestedNextTopicsPanel topics={suggestedNextTopics} currentTheme={currentTheme} />,
+    exportFormats: ['markdown', 'json'],
   },
   overviewDiagram: {
     title: '会議の概要図',
     icon: Network,
-    content: <OverviewDiagramPanel diagramData={overviewDiagramData} currentTheme={currentTheme} themeType={themeType} />
+    content: <OverviewDiagramPanel diagramData={overviewDiagramData} currentTheme={currentTheme} themeType={themeType} diagramRef={diagramRef} />,
+    exportFormats: ['svg', 'png', 'pdf'],
   },
   notes: {
     title: 'ノート',
     icon: BookOpen,
-    content: <NotesDisplay notes={notes} currentTheme={currentTheme} />
+    content: <NotesDisplay notes={notes} currentTheme={currentTheme} />,
+    exportFormats: ['markdown', 'csv', 'json'],
   },
   tasks: {
     title: 'タスク',
     icon: CheckSquare,
-    content: <TasksPanel tasks={tasks} currentTheme={currentTheme} />
+    content: <TasksPanel tasks={tasks} currentTheme={currentTheme} />,
+    exportFormats: ['markdown', 'csv', 'json'],
   },
   conversationHistory: {
     title: '会話履歴',
     icon: MessageSquare,
-    content: <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={currentTheme} />
-  }
+    content: <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={currentTheme} />,
+    exportFormats: ['markdown', 'json'],
+  },
 } as PanelConfig);

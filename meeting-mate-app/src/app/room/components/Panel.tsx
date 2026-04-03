@@ -3,6 +3,9 @@ import { GripVertical, EyeOff } from 'lucide-react';
 import { getPanelConfig } from '@/app/room/constants/panelConfig';
 import { themes } from '@/constants/themes';
 import { ParticipantEntry, NoteItem, TodoItem, CurrentAgenda, OverviewDiagramData, PanelId, TranscriptEntry } from '@/types/data';
+import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
+import ExportDropdown from '@/components/export/ExportDropdown';
+import type { ExportOption } from '@/components/export/ExportDropdown';
 
 interface PanelProps {
   id: PanelId;
@@ -11,10 +14,10 @@ interface PanelProps {
   transcripts: TranscriptEntry[];
   notes: NoteItem[];
   tasks: TodoItem[];
-  currentAgenda: CurrentAgenda | null; // null を許容
+  currentAgenda: CurrentAgenda | null;
   suggestedNextTopics: string[];
-  overviewDiagramData: OverviewDiagramData | null; // null を許容
-  currentTheme: typeof themes.dark; // themesの型を正確に指定
+  overviewDiagramData: OverviewDiagramData | null;
+  currentTheme: typeof themes.dark;
   themeType: 'light' | 'dark' | 'modern';
   chatHistory: Array<{ id: number; user: string; avatar: string; message: string; timestamp: string; type: 'chat' | 'system' }>;
   onDragStart: (e: React.DragEvent, id: PanelId) => void;
@@ -27,6 +30,10 @@ interface PanelProps {
   onParticipantEnter: (id: string) => void;
   onParticipantLeave: (id: string) => void;
   dragged: PanelId | null;
+  /** パネル個別エクスポートのオプション */
+  exportOptions?: ExportOption[];
+  /** Mermaid 図エクスポート用 ref */
+  diagramRef?: React.RefObject<MermaidDiagramHandle | null>;
 }
 
 const Panel = ({
@@ -52,10 +59,12 @@ const Panel = ({
   onParticipantEnter,
   onParticipantLeave,
   dragged,
+  exportOptions,
+  diagramRef,
 }: PanelProps) => {
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave, diagramRef),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave, diagramRef]
   );
 
   const cfg = panelConfig[id];
@@ -65,19 +74,31 @@ const Panel = ({
     <div
       className={`panel-draggable ${currentTheme.card} p-4 group
         ${dragged === id ? 'opacity-40 scale-95' : ''}`}>
-      <div
-        draggable
-        onDragStart={e => onDragStart(e, id)}
-        onDragEnd={onDragEnd}
-        onTouchStart={e => onTouchStart(e, id, idx)}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-        onDoubleClick={onDoubleClick}
-        className="flex justify-between items-center mb-2 cursor-move">
-        <h3 className={`flex items-center gap-2 text-sm font-semibold ${currentTheme.text.primary}`}>
-          <cfg.icon className="w-4 h-4" />{cfg.title}
-        </h3>
-        <div className="flex items-center gap-1">
+      {/* ヘッダー: タイトル (ドラッグ可能) + 操作ボタン (ドラッグ不可) */}
+      <div className="flex justify-between items-center mb-2">
+        {/* ドラッグ可能領域: タイトル + Grip */}
+        <div
+          draggable
+          onDragStart={e => onDragStart(e, id)}
+          onDragEnd={onDragEnd}
+          onTouchStart={e => onTouchStart(e, id, idx)}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+          onDoubleClick={onDoubleClick}
+          className="flex items-center gap-2 cursor-move flex-1 min-w-0"
+        >
+          <h3 className={`flex items-center gap-2 text-sm font-semibold ${currentTheme.text.primary} truncate`}>
+            <cfg.icon className="w-4 h-4 flex-shrink-0" />{cfg.title}
+          </h3>
+        </div>
+        {/* 操作ボタン領域: ドラッグ不可 */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {exportOptions && exportOptions.length > 0 && (
+            <ExportDropdown
+              options={exportOptions}
+              currentTheme={currentTheme}
+            />
+          )}
           {onToggleVisibility && (
             <button
               onClick={(e) => {
