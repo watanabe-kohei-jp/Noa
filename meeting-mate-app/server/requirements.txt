@@ -12,3 +12,6 @@ aiohttp
 google-cloud-speech
 chromadb
 google-genai
+google-auth
+google-auth-oauthlib
+slack-sdk

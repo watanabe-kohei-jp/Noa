@@ -85,6 +85,7 @@ export function useBrain(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               request: request.request,
+              room_id: roomId || "",
               meeting_context: meetingContext,
             }),
             signal: controller.signal,

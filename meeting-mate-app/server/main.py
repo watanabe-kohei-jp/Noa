@@ -260,11 +260,19 @@ async def deep_analysis_endpoint(request: DeepAnalysisRequest, user: dict = Depe
 
 class BrainRequest(BaseModel):
     request: str
+    room_id: str
     meeting_context: Optional[Dict[str, Any]] = {}
 
 @app.post("/api/brain", summary="Process delegate_to_brain requests via Smart LLM")
 async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_user)):
     """Brain LLM でツール選択・実行・応答生成を行う"""
+    uid = user["uid"]
+
+    # Room membership チェック
+    room_data = db.reference(f"rooms/{req.room_id}").get()
+    if not room_data or not room_data.get("participants", {}).get(uid):
+        raise HTTPException(status_code=403, detail="Not a participant of this room")
+
     try:
         result = await process_brain_request(
             request=req.request,

@@ -53,6 +53,13 @@ VERTEX_MODEL_NAME = os.environ.get("LLM_MODEL", "gemini-2.5-flash")
 VERTEX_AI_AVAILABLE = False
 
 # ============================================================
+# OAuth 設定 (外部ツール統合)
+# ============================================================
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "")
+
+# ============================================================
 # Firebase Configuration
 # ============================================================
 FIREBASE_DATABASE_URL = os.environ.get("FIREBASE_DATABASE_URL")

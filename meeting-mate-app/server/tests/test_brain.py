@@ -9,6 +9,7 @@ if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
 from brain import extract_actions, execute_tool  # noqa: E402
+from integrations.registry import registry  # noqa: E402
 
 
 class ExtractActionsTests(unittest.TestCase):
@@ -106,6 +107,53 @@ class GenerateDiagramRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["success"])
         mock_llm.assert_awaited_once()
+
+
+class ToolRegistryTests(unittest.TestCase):
+    def test_all_9_builtin_tools_registered(self):
+        expected = {
+            "knowledge_base_search", "calculate", "get_current_time",
+            "get_meeting_context", "summarize_discussion", "create_task",
+            "generate_diagram", "search_past_meetings", "deep_analysis",
+        }
+        self.assertEqual(set(registry.tool_names), expected)
+
+    def test_follow_up_allowed_matches_expected(self):
+        expected = {
+            "knowledge_base_search", "calculate", "get_current_time",
+            "get_meeting_context", "summarize_discussion", "search_past_meetings",
+        }
+        self.assertEqual(registry.get_follow_up_allowed(), expected)
+
+    def test_follow_up_excludes_write_tools(self):
+        disallowed = {"create_task", "generate_diagram", "deep_analysis"}
+        allowed = registry.get_follow_up_allowed()
+        self.assertTrue(disallowed.isdisjoint(allowed))
+
+    def test_build_tool_prompt_contains_all_tools(self):
+        prompt = registry.build_tool_prompt()
+        for name in registry.tool_names:
+            self.assertIn(name, prompt)
+
+    def test_get_returns_none_for_unknown(self):
+        self.assertIsNone(registry.get("nonexistent_tool"))
+
+
+class ExecuteToolRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_current_time_via_registry(self):
+        result = await execute_tool("get_current_time", {}, {})
+        self.assertIn("datetime", result)
+        self.assertIn("formatted", result)
+        self.assertEqual(result["timezone"], "Asia/Tokyo")
+
+    async def test_calculate_via_registry(self):
+        result = await execute_tool("calculate", {"expression": "2+3"}, {})
+        self.assertTrue(result["success"])
+        self.assertEqual(result["result"], 5)
+
+    async def test_unknown_tool_returns_error(self):
+        result = await execute_tool("nonexistent_tool", {}, {})
+        self.assertIn("error", result)
 
 
 if __name__ == "__main__":
