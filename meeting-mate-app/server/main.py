@@ -10,6 +10,7 @@ from llm_provider import llm_complete, strip_code_blocks, detect_provider
 from deep_analysis import route_and_analyze
 from brain import process_brain_request, process_proactive_check
 from vision_analyzer import analyze_vision
+from media_api import router as media_router
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
@@ -97,6 +98,7 @@ ALLOWED_ORIGINS = os.environ.get(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(media_router)
 
 agenda_agent = AgendaManagementAgent(config_path=os.path.join(
     AGENT_CONFIG_DIR, "agenda_agent_config.json"))
@@ -261,6 +263,8 @@ async def deep_analysis_endpoint(request: DeepAnalysisRequest, user: dict = Depe
 class BrainRequest(BaseModel):
     request: str
     meeting_context: Optional[Dict[str, Any]] = {}
+    room_id: Optional[str] = None
+    session_id: Optional[str] = None
 
 @app.post("/api/brain", summary="Process delegate_to_brain requests via Smart LLM")
 async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_user)):
@@ -270,6 +274,24 @@ async def brain_endpoint(req: BrainRequest, user: dict = Depends(get_current_use
             request=req.request,
             meeting_context=req.meeting_context or {},
         )
+
+        # Brain 結果を mediaArchive に永続化
+        if req.room_id:
+            try:
+                uid = user["uid"]
+                room_data = db.reference(f"rooms/{req.room_id}").get()
+                if room_data and room_data.get("participants", {}).get(uid):
+                    archive_base = f"mediaArchive/{req.room_id}/{req.session_id}" if req.session_id else f"mediaArchive/{req.room_id}/_no_session"
+                    db.reference(f"{archive_base}/brainResults").push({
+                        "request": req.request,
+                        "response_text": result.get("response_text", ""),
+                        "actions": result.get("actions"),
+                        "metadata": result.get("metadata"),
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    })
+            except Exception as archive_err:
+                logger.warning(f"Failed to archive brain result: {archive_err}")
+
         return result
     except Exception as e:
         logger.error(f"Brain processing failed: {e}", exc_info=True)
@@ -524,6 +546,21 @@ async def delete_session_endpoint(room_id: str, session_id: str):
 
     # Firebase から削除
     session_ref.delete()
+
+    # mediaArchive からも削除
+    try:
+        db.reference(f"mediaArchive/{room_id}/{session_id}").delete()
+    except Exception as e:
+        logger.warning(f"Failed to delete mediaArchive for session {session_id}: {e}")
+
+    # ローカルメディアファイル削除
+    try:
+        from storage import get_storage
+        deleted = get_storage().delete_session_files(room_id, session_id)
+        if deleted:
+            logger.info(f"Deleted {deleted} media files for session {session_id}")
+    except Exception as e:
+        logger.warning(f"Failed to delete media files for session {session_id}: {e}")
 
     # currentSessionId がこのセッションなら null にリセット
     current_ref = db.reference(f"rooms/{room_id}/currentSessionId")

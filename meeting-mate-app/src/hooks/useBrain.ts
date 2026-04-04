@@ -43,6 +43,7 @@ export function useBrain(
   callbacks?: BrainCallbacks,
   thinkingQueue?: ThinkingQueueCallbacks,
   roomId?: string | null,
+  currentSessionId?: string | null,
 ) {
   const [isProcessing, setIsProcessing] = useState(false);
   const inFlightCountRef = useRef(0);
@@ -86,6 +87,8 @@ export function useBrain(
             body: JSON.stringify({
               request: request.request,
               meeting_context: meetingContext,
+              room_id: roomId || undefined,
+              session_id: currentSessionId || undefined,
             }),
             signal: controller.signal,
           });
@@ -208,7 +211,7 @@ export function useBrain(
         setIsProcessing(inFlightCountRef.current > 0);
       }
     },
-    [roomData, roomId]
+    [roomData, roomId, currentSessionId]
   );
 
   const abortAll = useCallback(() => {

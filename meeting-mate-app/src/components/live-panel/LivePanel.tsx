@@ -31,6 +31,8 @@ import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectCon
 import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
 import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
 import { useProactiveMonitor } from "../../hooks/useProactiveMonitor";
+import { useMediaPersistence } from "../../hooks/useMediaPersistence";
+import { useMediaRecorder } from "../../hooks/useMediaRecorder";
 import ProactiveSuggestionBanner from "./ProactiveSuggestionBanner";
 
 // Firebase
@@ -134,7 +136,24 @@ function LivePanelInner({
       });
     },
   }), [roomId, currentSessionId]);
-  const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId);
+  const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId, currentSessionId);
+
+  // Media persistence hooks
+  const mediaPersistence = useMediaPersistence({
+    roomId,
+    sessionId: currentSessionId ?? null,
+    enabled: connected,
+  });
+  const micRecorder = useMediaRecorder({
+    source: "mic",
+    roomId,
+    sessionId: currentSessionId ?? null,
+  });
+  const tabRecorder = useMediaRecorder({
+    source: "tab",
+    roomId,
+    sessionId: currentSessionId ?? null,
+  });
 
   // Auto-intervene handler: confidence >= 0.9 → バナーなしで Live AI にテキスト注入
   // Returns true if injection succeeded, false to fall back to banner
@@ -194,8 +213,9 @@ function LivePanelInner({
       return;
     }
     client.sendRealtimeInput([{ mimeType, data: base64 }]);
+    mediaPersistence.persistImage(base64, mimeType);
     console.log("[LivePanel] sendImage: sent", mimeType, `${Math.round(base64.length / 1024)}KB`);
-  }, [connected, client]);
+  }, [connected, client, mediaPersistence]);
 
   // Image attachment state
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
@@ -435,6 +455,7 @@ function LivePanelInner({
         .start(sharedStream)
         .then(() => {
           audioRecorder.setVadEnabled(true);
+          micRecorder.startRecording(sharedStream);
           console.log("[LivePanel] audioRecorder started OK (VAD enabled)");
         })
         .catch((err: unknown) =>
@@ -442,6 +463,7 @@ function LivePanelInner({
         );
     } else {
       audioRecorder.stop();
+      micRecorder.stopRecording();
     }
 
     return () => {
@@ -524,7 +546,8 @@ function LivePanelInner({
     tabStreamRef.current?.getTracks().forEach((t) => t.stop());
     tabStreamRef.current = null;
     setTabAudioActive(false);
-  }, []);
+    tabRecorder.stopRecording();
+  }, [tabRecorder]);
 
   // Camera capture
   const stopCamera = useCallback(() => {
@@ -556,7 +579,10 @@ function LivePanelInner({
     cleanupSession();
     stopTabAudio();
     stopCamera();
-  }, [cleanupSession, stopTabAudio, stopCamera]);
+    mediaPersistence.flush();
+    micRecorder.stopRecording();
+    tabRecorder.stopRecording();
+  }, [cleanupSession, stopTabAudio, stopCamera, mediaPersistence, micRecorder, tabRecorder]);
 
   const handleDisconnect = useCallback(() => {
     disconnect(); // isManualDisconnect=true set internally → connectionState="disconnected"
@@ -595,6 +621,7 @@ function LivePanelInner({
 
       tabStreamRef.current = stream;
       setTabAudioActive(true);
+      tabRecorder.startRecording(stream);
 
       // Tab audio -> PCM16 -> Gemini
       const audioTracks = stream.getAudioTracks();
@@ -647,6 +674,7 @@ function LivePanelInner({
           const base64 = canvas.toDataURL("image/jpeg", 0.5);
           const data = base64.slice(base64.indexOf(",") + 1);
           client.sendRealtimeInput([{ mimeType: "image/jpeg", data }]);
+          mediaPersistence.bufferFrame(base64, "frames_screen");
 
           // Vision 分析: 差分検出 + バックエンド送信
           computeAndSendVisionSnapshot(canvas);
@@ -694,6 +722,7 @@ function LivePanelInner({
         const base64 = canvas.toDataURL("image/jpeg", 0.5);
         const data = base64.slice(base64.indexOf(",") + 1);
         client.sendRealtimeInput([{ mimeType: "image/jpeg", data }]);
+        mediaPersistence.bufferFrame(base64, "frames_camera");
 
         cameraTimerRef.current = setTimeout(sendFrame, 2000); // 0.5 FPS
       };
