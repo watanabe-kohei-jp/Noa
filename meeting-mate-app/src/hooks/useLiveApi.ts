@@ -108,7 +108,6 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
       const reconnectConfig: LiveConnectConfig = {
         ...currentConfig,
         sessionResumption: {
-          transparent: true,
           handle: sessionHandleRef.current,
         },
       };
@@ -220,7 +219,7 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
     // Inject sessionResumption for initial connection
     const connectConfig: LiveConnectConfig = {
       ...currentConfig,
-      sessionResumption: { transparent: true },
+      sessionResumption: {},
     };
 
     client.disconnect();
