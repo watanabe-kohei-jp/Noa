@@ -42,3 +42,6 @@ next-env.d.ts
 
 # firebase
 .firebase
+
+# media data (dev local storage)
+server/data/
