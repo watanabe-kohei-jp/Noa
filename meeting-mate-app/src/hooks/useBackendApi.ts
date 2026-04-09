@@ -50,41 +50,45 @@ export const useBackendApi = (): UseBackendApiResult => {
       body: JSON.stringify(requestBody)
     });
     if (!response.ok) {
-      // エラーレスポンスをテキストとして一度だけ読み取る
       const errorText = await response.text();
-
-      // JSONとして解析を試みる
+      let errorData: Record<string, unknown> | null = null;
       try {
-        const errorData = JSON.parse(errorText);
-        if (errorData && errorData.error && errorData.error.message) {
-          throw new Error(`APIエラー ${response.status}: ${errorData.error.message}`);
-        } else {
-          throw new Error(`APIエラー ${response.status}: ${JSON.stringify(errorData)}`);
-        }
-      } catch (jsonError) {
-        // JSONとして解析できない場合はテキストをそのまま使用
-        console.error("Failed to parse error response as JSON:", jsonError);
-        throw new Error(`APIエラー ${response.status}: ${errorText}`);
+        errorData = JSON.parse(errorText);
+      } catch {
+        // JSON解析不可 → errorData は null のまま
       }
+
+      if (errorData && typeof errorData === 'object') {
+        const errObj = errorData as { error?: { message?: string }; detail?: string };
+        if (errObj.error?.message) {
+          throw new Error(`APIエラー ${response.status}: ${errObj.error.message}`);
+        }
+        if (errObj.detail) {
+          throw new Error(`APIエラー ${response.status}: ${errObj.detail}`);
+        }
+        throw new Error(`APIエラー ${response.status}: ${JSON.stringify(errorData)}`);
+      }
+      throw new Error(`APIエラー ${response.status}: ${errorText}`);
     }
 
     // 成功レスポンスの場合、JSONとして解析
     const responseText = await response.text();
+    let jsonResponse: BackendApiResponse & { error?: { code?: string | number; message?: string } };
     try {
-      const jsonResponse = JSON.parse(responseText);
-      
-      // Check for errors in the JSON response (FastAPI returns 200 with error details in JSON)
-      if (jsonResponse.error) {
-        const errorMessage = jsonResponse.error.message || 'Unknown error occurred';
-        const errorCode = jsonResponse.error.code || 'UNKNOWN';
-        throw new Error(`APIエラー [${errorCode}]: ${errorMessage}`);
-      }
-      
-      return jsonResponse;
-    } catch (error) {
-      console.error("Failed to parse API response as JSON:", error);
+      jsonResponse = JSON.parse(responseText);
+    } catch {
+      console.error("Failed to parse API response as JSON:", responseText.substring(0, 200));
       throw new Error("APIレスポンスの解析に失敗しました");
     }
+
+    // JSON-RPC error check（catch の外で判定）
+    if (jsonResponse.error) {
+      const errorMessage = jsonResponse.error.message || 'Unknown error occurred';
+      const errorCode = jsonResponse.error.code || 'UNKNOWN';
+      throw new Error(`APIエラー [${errorCode}]: ${errorMessage}`);
+    }
+
+    return jsonResponse;
   }, []);
 
   return { callBackendApi };

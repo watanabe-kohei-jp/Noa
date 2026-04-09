@@ -1022,18 +1022,17 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
     if not room_id:
         return JsonRpcResponse(error={"code": -32602, "message": "Invalid params: 'roomId' missing"}, id=request.id)
 
-    # 認証ユーザーの認可チェック（参加者のみ許可）
-    # NOTE: speakerId は diarization ID (speaker_1 等) であり Firebase uid ではないためチェックしない
-    uid = user["uid"]
-    room_ref_check = db.reference(f"rooms/{room_id}")
-    room_data_check = room_ref_check.get()
-    if not room_data_check or not room_data_check.get("participants", {}).get(uid):
-        return JsonRpcResponse(
-            error={"code": -32600, "message": "Not a participant of this room"},
-            id=request.id
-        )
-
     try:
+        # 認証ユーザーの認可チェック（参加者のみ許可）
+        # NOTE: speakerId は diarization ID (speaker_1 等) であり Firebase uid ではないためチェックしない
+        uid = user["uid"]
+        room_ref_check = db.reference(f"rooms/{room_id}")
+        room_data_check = room_ref_check.get()
+        if not room_data_check or not room_data_check.get("participants", {}).get(uid):
+            return JsonRpcResponse(
+                error={"code": -32003, "message": "Not a participant of this room"},
+                id=request.id
+            )
         room_ref = db.reference(f"rooms/{room_id}")
         session_id = task_payload.sessionId
         session_data_path = get_session_data_path(room_id, session_id)
@@ -1147,13 +1146,13 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
             return JsonRpcResponse(result=agent_processing_result, id=request.id)
         except Exception as e:
             logger.error(f"[{room_id}] Error in orchestrate_agents: {e}", exc_info=True)
-            return JsonRpcResponse(error={"code": -32000, "message": f"LLM processing error: {str(e)}"}, id=request.id)
+            return JsonRpcResponse(error={"code": -32000, "message": "LLM processing error"}, id=request.id)
         finally:
             session_ref.child("is_llm_processing").set(False)
 
     except Exception as e:
         logger.error(f"Error in /invoke: {e}", exc_info=True)
-        return JsonRpcResponse(error={"code": -32000, "message": f"Server error: {e}"}, id=request.id)
+        return JsonRpcResponse(error={"code": -32000, "message": "Internal server error"}, id=request.id)
 
 
 # ================================================================
