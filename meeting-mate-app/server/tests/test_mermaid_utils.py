@@ -150,5 +150,117 @@ class ValidateAndCleanMermaidTests(unittest.TestCase):
         self.assertEqual(cleaned, "sequenceDiagram\n    Alice->>Bob: Hi")
 
 
+    # === #94: フローチャートコロンラベル修正テスト ===
+
+    def test_fixes_colon_label_bare_ids(self):
+        """A --> B : "label" → A -->|"label"| B"""
+        raw = 'graph TD\n    A --> B : "影響を与える"'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"影響を与える"|', cleaned)
+        self.assertIn("A", cleaned)
+        self.assertIn("B", cleaned)
+
+    def test_fixes_colon_label_bracket_nodes(self):
+        """A["開始"] --> B["終了"] : "label" → A["開始"] -->|"label"| B["終了"]"""
+        raw = 'graph TD\n    A["開始"] --> B["終了"] : "ラベル"'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"ラベル"|', cleaned)
+        self.assertIn('A["開始"]', cleaned)
+        self.assertIn('B["終了"]', cleaned)
+
+    def test_no_label_edge_unchanged(self):
+        """A --> B (ラベルなし) は変更しない"""
+        raw = "graph TD\n    A --> B"
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertEqual(cleaned, "graph TD\n    A --> B")
+
+    def test_pipe_label_already_correct(self):
+        """既に正しい A -->|"label"| B は変更しない"""
+        raw = 'graph TD\n    A -->|"label"| B'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"label"|', cleaned)
+
+    def test_dash_label_already_correct(self):
+        """既に正しい A -- "label" --> B は変更しない"""
+        raw = 'graph TD\n    A -- "label" --> B'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-- "label" -->', cleaned)
+
+    def test_sequence_diagram_colon_untouched(self):
+        """シーケンス図の Alice->>Bob: Hello は変更しない"""
+        raw = "sequenceDiagram\n    Alice->>Bob: Hello"
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertEqual(cleaned, "sequenceDiagram\n    Alice->>Bob: Hello")
+
+    def test_fixes_unquoted_colon_label(self):
+        """未クォートラベル A --> B : label → A -->|"label"| B"""
+        raw = "graph TD\n    A --> B : some label"
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"some label"|', cleaned)
+
+    def test_fixes_colon_label_with_thick_arrow(self):
+        """A ==> B : "label" → A ==>|"label"| B"""
+        raw = 'graph TD\n    A ==> B : "heavy"'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('==>|"heavy"|', cleaned)
+
+    def test_fixes_colon_label_with_dotted_arrow(self):
+        """A -.-> B : "label" → A -.->|"label"| B"""
+        raw = 'graph TD\n    A -.-> B : "dotted"'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-.->|"dotted"|', cleaned)
+
+    def test_multiple_edges_with_colon_labels(self):
+        """複数行のコロンラベルがすべて修正される"""
+        raw = 'graph TD\n    A --> B : "first"\n    B --> C : "second"\n    C --> D'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"first"|', cleaned)
+        self.assertIn('-->|"second"|', cleaned)
+        self.assertIn("C --> D", cleaned)
+
+    def test_preserves_colon_inside_bracket_label(self):
+        """ブラケット内のコロン A --> B["項目: 説明"] は保持"""
+        raw = 'graph TD\n    A --> B["項目: 説明"]'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('B["項目: 説明"]', cleaned)
+
+    def test_issue94_reproduction(self):
+        """Issue #94 の再現ケース: SYSTEM_MONITOR : "影響を与える" """
+        raw = 'graph TD\n    A["システム"] --> SYSTEM_MONITOR : "影響を与える"'
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"影響を与える"|', cleaned)
+        self.assertIn("SYSTEM_MONITOR", cleaned)
+
+    # === #94: flowchart 正規化拡張テスト ===
+
+    def test_normalizes_flowchart_tb(self):
+        raw = "flowchart TB\n    A --> B"
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertTrue(cleaned.startswith("graph TB"))
+
+    def test_normalizes_flowchart_bt(self):
+        raw = "flowchart BT\n    A --> B"
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertTrue(cleaned.startswith("graph BT"))
+
+    def test_normalizes_flowchart_rl(self):
+        raw = "flowchart RL\n    A --> B"
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertTrue(cleaned.startswith("graph RL"))
+
+
 if __name__ == "__main__":
     unittest.main()
