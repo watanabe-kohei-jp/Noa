@@ -1,5 +1,5 @@
 import React from 'react';
-import { Users, GitBranch, CheckSquare, Network, ClipboardList, BookOpen, MessageSquare } from 'lucide-react';
+import { Users, GitBranch, CheckSquare, Network, ClipboardList, BookOpen, MessageSquare, CalendarPlus } from 'lucide-react';
 import ParticipantsList from '@/app/room/components/ParticipantsList';
 import NotesDisplay from '@/app/room/components/NotesDisplay';
 import TasksPanel from '@/app/room/components/TasksPanel';
@@ -7,7 +7,8 @@ import OverviewDiagramPanel from '@/app/room/components/OverviewDiagramPanel';
 import CurrentAgendaDisplayPanel from '@/app/room/components/CurrentAgendaDisplayPanel';
 import SuggestedNextTopicsPanel from '@/app/room/components/SuggestedNextTopicsPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
-import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry } from '@/types/data';
+import CalendarLinksPanel from '@/app/room/components/CalendarLinksPanel';
+import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, CalendarLinkItem } from '@/types/data';
 import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
 import { themes } from '@/constants/themes';
 
@@ -45,6 +46,7 @@ export const getPanelConfig = (
   onParticipantEnter: (id: string) => void,
   onParticipantLeave: (id: string) => void,
   diagramRef?: React.RefObject<MermaidDiagramHandle | null>,
+  calendarLinks?: CalendarLinkItem[],
 ): PanelConfig => ({
   participants: {
     title: '参加者',
@@ -87,5 +89,11 @@ export const getPanelConfig = (
     icon: MessageSquare,
     content: <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={currentTheme} />,
     exportFormats: ['markdown', 'json'],
+  },
+  calendarLinks: {
+    title: 'カレンダー',
+    icon: CalendarPlus,
+    content: <CalendarLinksPanel calendarLinks={calendarLinks || []} currentTheme={currentTheme} />,
+    exportFormats: ['json'],
   },
 } as PanelConfig);

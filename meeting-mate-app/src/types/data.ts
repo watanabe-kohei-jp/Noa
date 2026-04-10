@@ -64,7 +64,16 @@ export interface MeetingSession {
   status: "active" | "ended";
 }
 
-export type PanelId = "participants" | "currentAgenda" | "suggestedTopics" | "overviewDiagram" | "notes" | "tasks" | "conversationHistory";
+export type CalendarLinkItem = {
+  id: string;
+  summary: string;
+  calendarUrl: string;
+  startTime?: string;
+  endTime?: string;
+  timestamp: string;
+};
+
+export type PanelId = "participants" | "currentAgenda" | "suggestedTopics" | "overviewDiagram" | "notes" | "tasks" | "conversationHistory" | "calendarLinks";
 
 // SpeechRecognition types
 export interface SpeechRecognitionErrorEvent extends Event {

@@ -70,6 +70,26 @@ class ExtractActionsTests(unittest.TestCase):
             [],
         )
 
+    def test_calendar_create_action_shape(self):
+        result = {
+            "success": True,
+            "calendar_url": "https://calendar.google.com/calendar/event?action=TEMPLATE&text=test",
+            "event_summary": "定例会議",
+            "start_time": "2026-04-15T14:00",
+            "end_time": "2026-04-15T15:00",
+        }
+        actions = extract_actions("google_calendar_create", result)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action"], "create_calendar_event")
+        self.assertEqual(actions[0]["data"]["event_summary"], "定例会議")
+        self.assertIn("calendar.google.com", actions[0]["data"]["calendar_url"])
+
+    def test_calendar_create_failure_returns_no_actions(self):
+        self.assertEqual(
+            extract_actions("google_calendar_create", {"success": False}),
+            [],
+        )
+
 
 class GenerateDiagramRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_succeeds_on_first_attempt(self):

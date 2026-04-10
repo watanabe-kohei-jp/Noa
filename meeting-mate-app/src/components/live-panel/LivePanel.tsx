@@ -49,6 +49,7 @@ interface LivePanelInnerProps {
   sharedStream?: MediaStream | null;
   currentSessionId?: string | null;
   onReady?: (api: LivePanelAPI) => void;
+  onCalendarLink?: (link: { summary: string; calendarUrl: string; startTime?: string; endTime?: string }) => void;
 }
 
 function LivePanelInner({
@@ -57,6 +58,7 @@ function LivePanelInner({
   sharedStream,
   currentSessionId,
   onReady,
+  onCalendarLink,
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connectionState, connect, disconnect, volume } =
     useLiveAPIContext();
@@ -135,7 +137,8 @@ function LivePanelInner({
         mermaidDefinition: mermaidCode,
       });
     },
-  }), [roomId, currentSessionId]);
+    onCalendarLink: onCalendarLink || undefined,
+  }), [roomId, currentSessionId, onCalendarLink]);
   const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId, currentSessionId);
 
   // Media persistence hooks
@@ -921,6 +924,7 @@ interface LivePanelProps {
   sharedStream?: MediaStream | null;
   currentSessionId?: string | null;
   onReady?: (api: LivePanelAPI) => void;
+  onCalendarLink?: (link: { summary: string; calendarUrl: string; startTime?: string; endTime?: string }) => void;
 }
 
 export default function LivePanel({
@@ -929,6 +933,7 @@ export default function LivePanel({
   sharedStream,
   currentSessionId,
   onReady,
+  onCalendarLink,
 }: LivePanelProps) {
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
@@ -975,6 +980,7 @@ export default function LivePanel({
           sharedStream={sharedStream}
           currentSessionId={currentSessionId}
           onReady={onReady}
+          onCalendarLink={onCalendarLink}
         />
       </ThinkingQueueProvider>
     </LiveAPIProvider>
