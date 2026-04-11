@@ -238,10 +238,13 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
     let hasAudio = false;
     let hasVideo = false;
     for (const ch of chunks) {
-      this.session?.sendRealtimeInput({ media: ch });
-      if (ch.mimeType.includes("audio")) hasAudio = true;
-      if (ch.mimeType.includes("image")) hasVideo = true;
-      if (hasAudio && hasVideo) break;
+      if (ch.mimeType.includes("audio")) {
+        this.session?.sendRealtimeInput({ audio: ch });
+        hasAudio = true;
+      } else if (ch.mimeType.includes("image")) {
+        this.session?.sendRealtimeInput({ video: ch });
+        hasVideo = true;
+      }
     }
     const message =
       hasAudio && hasVideo

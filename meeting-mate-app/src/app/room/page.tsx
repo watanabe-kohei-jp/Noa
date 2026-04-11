@@ -32,7 +32,7 @@ import type { ReportData } from '@/lib/export/report-formatter';
 
 // 型定義とユーティリティ関数のインポート
 import {
-  TranscriptEntry, PanelId
+  TranscriptEntry, PanelId, CalendarLinkItem, generateUniqueId
 } from '@/types/data';
 import type { LivePanelAPI } from '@/types/live-api';
 
@@ -78,6 +78,9 @@ export default function RoomPage() {
 
   // Mermaid 図エクスポート用 ref
   const diagramRef = useRef<MermaidDiagramHandle>(null);
+
+  // カレンダーリンク
+  const [calendarLinks, setCalendarLinks] = useState<CalendarLinkItem[]>([]);
 
   // 一括エクスポートダイアログ
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
@@ -344,7 +347,7 @@ export default function RoomPage() {
   // Pinterest風レイアウト用の状態
   const [cols, setCols] = useState<PanelId[][]>([
     ['participants', 'conversationHistory', 'tasks'],
-    ['currentAgenda', 'suggestedTopics'],
+    ['currentAgenda', 'suggestedTopics', 'calendarLinks'],
     ['overviewDiagram', 'notes']
   ]);
   const [widths, setWidths] = useState<number[]>([33.34, 33.33, 33.33]); // %
@@ -440,6 +443,7 @@ export default function RoomPage() {
       'conversationHistory',
       'currentAgenda',
       'suggestedTopics',
+      'calendarLinks',
       'tasks',
       'notes',
       'overviewDiagram'
@@ -454,7 +458,7 @@ export default function RoomPage() {
     flat.forEach(panelId => {
       if (panelId === 'participants' || panelId === 'conversationHistory' || panelId === 'tasks') {
         newCols[0].push(panelId);
-      } else if (panelId === 'currentAgenda' || panelId === 'suggestedTopics') {
+      } else if (panelId === 'currentAgenda' || panelId === 'suggestedTopics' || panelId === 'calendarLinks') {
         newCols[1].push(panelId);
       } else if (panelId === 'overviewDiagram' || panelId === 'notes') {
         newCols[2].push(panelId);
@@ -564,8 +568,8 @@ export default function RoomPage() {
   }, []);
 
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, diagramRef),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, calendarLinks]
   );
 
   // パネルごとのエクスポートオプションを生成
@@ -622,10 +626,24 @@ export default function RoomPage() {
         return currentAgenda?.mainTopic ? makeTextOptions('agenda', ['markdown', 'json']) : [];
       case 'suggestedTopics':
         return suggestedNextTopics.length > 0 ? makeTextOptions('suggestedTopics', ['markdown', 'json']) : [];
+      case 'calendarLinks':
+        return calendarLinks.length > 0 ? [{
+          label: 'JSON でダウンロード',
+          format: 'json' as const,
+          onClick: () => {
+            const blob = new Blob([JSON.stringify(calendarLinks, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'calendar-links.json';
+            a.click();
+            URL.revokeObjectURL(url);
+          },
+        }] : [];
       default:
         return [];
     }
-  }, [overviewDiagramData, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId]);
+  }, [overviewDiagramData, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId, calendarLinks]);
 
   // zoomPanelIdが設定されたらモーダルを表示
   useEffect(() => {
@@ -763,6 +781,7 @@ export default function RoomPage() {
       'conversationHistory',
       'currentAgenda',
       'suggestedTopics',
+      'calendarLinks',
       'tasks',
       'notes',
       'overviewDiagram'
@@ -1083,6 +1102,16 @@ export default function RoomPage() {
                 sharedStream={sharedStream}
                 currentSessionId={currentSessionId}
                 onReady={(api) => { livePanelApiRef.current = api; }}
+                onCalendarLink={(link) => {
+                  setCalendarLinks(prev => [...prev, {
+                    id: generateUniqueId(),
+                    summary: link.summary,
+                    calendarUrl: link.calendarUrl,
+                    startTime: link.startTime,
+                    endTime: link.endTime,
+                    timestamp: new Date().toISOString(),
+                  }]);
+                }}
               />
               <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-1" />
               {/* TTS再生/停止ボタン */}
