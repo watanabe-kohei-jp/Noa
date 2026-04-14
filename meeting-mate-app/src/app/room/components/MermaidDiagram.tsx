@@ -434,8 +434,34 @@ const MermaidDiagram = forwardRef<MermaidDiagramHandle, MermaidDiagramProps>(({ 
   const errorBgClass = isDarkTheme ? 'bg-red-900/50' : 'bg-red-50';
   const errorTextClass = isDarkTheme ? 'text-red-300' : 'text-red-500';
 
-  if (error) return <div ref={mermaidContainerRef} className={`${errorTextClass} text-sm p-2 ${errorBgClass} rounded-md`}>Error rendering diagram: {error}</div>;
-  return (<div ref={mermaidContainerRef} key={diagramId} className={`mermaid-diagram-container w-full h-full flex justify-center items-center overflow-hidden ${backgroundClass}`} style={{ minHeight: '150px' }}>{!svgContent && !error && <div className={`${textClass} text-sm`}>Loading diagram...</div>}</div>);
+  // エラーのみ (fallback SVG なし)
+  if (error && !svgContent) {
+    return (
+      <div className={`${errorTextClass} text-sm p-2 ${errorBgClass} rounded-md`}>
+        構文エラー: 図を再生成してください
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative w-full h-full">
+      {error && svgContent && (
+        <div className={`absolute top-0 left-0 right-0 z-10 ${errorTextClass} text-xs p-1.5 ${errorBgClass} rounded-t-md opacity-90`}>
+          構文エラー: 図を再生成してください
+        </div>
+      )}
+      <div
+        ref={mermaidContainerRef}
+        key={diagramId}
+        className={`mermaid-diagram-container w-full h-full flex justify-center items-center overflow-hidden ${backgroundClass}`}
+        style={{ minHeight: '150px' }}
+      >
+        {!svgContent && !error && (
+          <div className={`${textClass} text-sm`}>Loading diagram...</div>
+        )}
+      </div>
+    </div>
+  );
 });
 MermaidDiagram.displayName = 'MermaidDiagram';
 

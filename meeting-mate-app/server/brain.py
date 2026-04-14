@@ -280,10 +280,12 @@ async def _handle_generate_diagram(args: dict, meeting_context: dict) -> dict:
 5. ノードへのクラス適用は `class NodeId className` コマンドを使用（`:::` は禁止）
 6. subgraph タイトルはダブルクォートで囲むこと（例: `subgraph "セクション名"`）
 7. コメントは `%%` で記述すること（`%` 単体は不可）
+8. エッジラベルは `-->|"ラベル"|` 形式を使うこと（`A --> B : "ラベル"` は構文エラーになるため禁止）
+9. ノードラベルに `:` を含む場合は必ずダブルクォートで囲むこと（例: `A["項目: 説明"]`）
 
 **出力例:**
 graph TD
-    A["開始"] --> B["処理"]
+    A["開始"] -->|"次へ"| B["処理"]
     B --> C["終了"]
     classDef primary fill:#EFF6FF,stroke:#3B82F6,color:#1E40AF
     class A,C primary
@@ -376,6 +378,7 @@ pie title タスク状況
             "\n\n**重要（前回の生成で書式エラーがありました）: "
             "必ず `graph TD` または `graph LR` から開始してください。"
             "flowchart, sequenceDiagram 等は使用しないでください。"
+            "エッジラベルは `A -->|\"ラベル\"| B` の形式を使い、`A --> B : \"ラベル\"` は使わないでください。"
             "コードブロック(```)で囲まないでください。Mermaidコードのみを出力してください。**"
         ),
         "sequence": (
@@ -417,7 +420,7 @@ pie title タスク状況
                 temperature=temp,
                 max_tokens=2000,
             )
-            mermaid_code = validate_and_clean_mermaid(mermaid_raw)
+            mermaid_code = validate_and_clean_mermaid(mermaid_raw, allowed_types=[diagram_type])
             if mermaid_code:
                 if attempt_idx > 0:
                     logger.info(f"[Brain] generate_diagram succeeded on retry (attempt {attempt_idx + 1})")
