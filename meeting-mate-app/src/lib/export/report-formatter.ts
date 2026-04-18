@@ -3,12 +3,13 @@
  * 全データをまとめた Markdown / JSON を生成
  */
 
-import type { TranscriptEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData } from '@/types/data';
+import type { TranscriptEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, CalendarLinkItem } from '@/types/data';
 import {
   formatTranscriptAsMarkdown, formatTranscriptAsJson,
   formatTasksAsMarkdown, formatTasksAsJson,
   formatNotesAsMarkdown, formatNotesAsJson,
   formatAgendaAsMarkdown, formatAgendaAsJson,
+  formatCalendarLinksAsMarkdown, formatCalendarLinksAsJson,
 } from './text-export';
 
 export interface ReportData {
@@ -21,6 +22,7 @@ export interface ReportData {
   currentAgenda: CurrentAgenda | null;
   suggestedNextTopics: string[];
   overviewDiagram: OverviewDiagramData | null;
+  calendarLinks: CalendarLinkItem[];
 }
 
 /** 統合 Markdown レポートを生成 */
@@ -63,6 +65,11 @@ export function formatReportAsMarkdown(data: ReportData): string {
   lines.push('---');
   lines.push('');
 
+  // カレンダーリンク
+  lines.push(formatCalendarLinksAsMarkdown(data.calendarLinks));
+  lines.push('---');
+  lines.push('');
+
   // トランスクリプト
   lines.push(formatTranscriptAsMarkdown(data.transcript));
 
@@ -84,6 +91,7 @@ export function formatReportAsJson(data: ReportData): object {
     } : null,
     tasks: formatTasksAsJson(data.tasks),
     notes: formatNotesAsJson(data.notes),
+    calendarLinks: formatCalendarLinksAsJson(data.calendarLinks),
     transcript: formatTranscriptAsJson(data.transcript),
   };
 }

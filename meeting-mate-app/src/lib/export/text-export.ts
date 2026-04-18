@@ -6,7 +6,7 @@
  */
 
 import { downloadText, sanitizeFileName, getTimestamp } from './download-utils';
-import type { TranscriptEntry, TodoItem, NoteItem, CurrentAgenda } from '@/types/data';
+import type { TranscriptEntry, TodoItem, NoteItem, CurrentAgenda, CalendarLinkItem } from '@/types/data';
 
 // ============================================================
 // CSV セキュリティ: 式注入対策
@@ -197,6 +197,65 @@ export function formatAgendaAsJson(agenda: CurrentAgenda | null, suggestedTopics
     } : null,
     suggestedNextTopics: suggestedTopics || [],
   };
+}
+
+// ============================================================
+// カレンダーリンク
+// ============================================================
+
+const SAFE_URL_SCHEMES = /^(https?:|mailto:)/i;
+
+function isSafeCalendarUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  return SAFE_URL_SCHEMES.test(url.trim());
+}
+
+function escapeMarkdownLinkText(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/([\[\]()])/g, '\\$1')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+}
+
+function formatCalendarTimeRange(startTime?: string, endTime?: string): string {
+  const fmt = (s: string) => {
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? s : d.toLocaleString('ja-JP');
+  };
+  if (startTime && endTime) return ` (${fmt(startTime)} - ${fmt(endTime)})`;
+  if (startTime) return ` (${fmt(startTime)})`;
+  return '';
+}
+
+function sortCalendarLinksByTimestampDesc(links: CalendarLinkItem[]): CalendarLinkItem[] {
+  return [...links].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+}
+
+export function formatCalendarLinksAsMarkdown(links: CalendarLinkItem[]): string {
+  if (links.length === 0) return '# カレンダーリンク\n\nカレンダーリンクがありません。\n';
+  const lines = ['# カレンダーリンク\n'];
+  for (const l of sortCalendarLinksByTimestampDesc(links)) {
+    const summary = escapeMarkdownLinkText(l.summary || '(無題)');
+    const timeRange = formatCalendarTimeRange(l.startTime, l.endTime);
+    if (isSafeCalendarUrl(l.calendarUrl)) {
+      lines.push(`- [${summary}](${l.calendarUrl})${timeRange}`);
+    } else {
+      lines.push(`- ${summary}${timeRange}`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+export function formatCalendarLinksAsJson(links: CalendarLinkItem[]): object[] {
+  return sortCalendarLinksByTimestampDesc(links).map(l => ({
+    id: l.id,
+    summary: l.summary,
+    calendarUrl: l.calendarUrl,
+    startTime: l.startTime,
+    endTime: l.endTime,
+    timestamp: l.timestamp,
+  }));
 }
 
 // ============================================================
