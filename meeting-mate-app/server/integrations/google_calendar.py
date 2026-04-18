@@ -4,10 +4,13 @@ Google Calendar 統合 — URL ベース予定作成
 Google Calendar の「予定を追加」URL を生成する。
 実際の API 呼び出し (OAuth) は行わない MVP 実装。
 """
+import logging
 import re
 from datetime import datetime
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -51,6 +54,12 @@ async def handle_google_calendar_create(args: dict, meeting_context: dict) -> di
     description = args.get("description", "").strip()
     location = args.get("location", "").strip()
 
+    if end_time and not start_time:
+        return {
+            "success": False,
+            "message": "end_time を指定する場合は start_time も必要です。",
+        }
+
     # Google Calendar URL パラメータ組み立て
     params: dict[str, str] = {
         "action": "TEMPLATE",
@@ -62,9 +71,14 @@ async def handle_google_calendar_create(args: dict, meeting_context: dict) -> di
             gcal_start = _format_gcal_datetime(start_time)
             gcal_end = _format_gcal_datetime(end_time) if end_time else gcal_start
         except ValueError:
+            logger.warning(
+                "[GCal] datetime parse failed: start=%.64r end=%.64r",
+                start_time,
+                end_time,
+            )
             return {
                 "success": False,
-                "message": f"start_time / end_time のフォーマットが不正です: start={start_time!r} end={end_time!r}",
+                "message": "start_time / end_time のフォーマットが不正です。ISO8601 形式（例: 2026-04-15T14:00 または 2026-04-15T14:00:00+09:00）で指定してください。",
             }
         params["dates"] = f"{gcal_start}/{gcal_end}"
         params["ctz"] = "Asia/Tokyo"

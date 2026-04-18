@@ -46,6 +46,12 @@ class FormatGcalDatetimeTests(unittest.TestCase):
             _format_gcal_datetime("2026-04-15T00:00:00-05:00"), "20260415T140000"
         )
 
+    def test_utc_to_jst_rolls_over_date(self):
+        # UTC 2026-04-15T20:00 → JST 2026-04-16T05:00 (日付が繰り上がる)
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T20:00:00Z"), "20260416T050000"
+        )
+
 
 class HandleGoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_params(self):
@@ -140,6 +146,35 @@ class HandleGoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
         result = await handle_google_calendar_create({
             "summary": "test",
             "start_time": "next monday",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertIn("フォーマット", result["message"])
+
+    async def test_error_message_does_not_reflect_user_input(self):
+        """UI 向けメッセージに生のユーザー入力を含めない"""
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "malicious<script>",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertNotIn("malicious", result["message"])
+
+    async def test_end_time_without_start_time_fails(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "end_time": "2026-04-15T15:00",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertIn("start_time", result["message"])
+
+    async def test_valid_start_with_invalid_end_returns_failure(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "2026-04-15T14:00",
+            "end_time": "next monday",
         }, {})
 
         self.assertFalse(result["success"])
