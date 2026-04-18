@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback, Fragment } from 'react';
-import { Users, Clock, LogOut, X, User, Send, Sun, Moon, Palette, Mic, Plus, Eye, Volume2, VolumeX} from 'lucide-react';
+import { Users, Clock, LogOut, X, User, Send, Sun, Moon, Palette, Mic, Plus, Eye, Volume2, VolumeX, LayoutDashboard} from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import Link from 'next/link';
@@ -1032,6 +1032,16 @@ export default function RoomPage() {
                 <Eye className="w-4 h-4" />
                 <span>{hiddenPanels.size}</span>
               </button>
+            )}
+            {currentUser && (
+              <Link
+                href="/dashboard"
+                className={`px-4 py-2 rounded-lg border transition-all duration-200 flex items-center space-x-2 ${selectedTheme.button.secondary}`}
+                title="マイセッション（ダッシュボード）"
+              >
+                <LayoutDashboard className="w-4 h-4" />
+                <span className="hidden sm:inline">ダッシュボード</span>
+              </Link>
             )}
             <button onClick={handleLogout} className={`px-4 py-2 rounded-lg border transition-all duration-200 flex items-center space-x-2 ${selectedTheme.button.danger}`}>
               <LogOut className="w-4 h-4" />

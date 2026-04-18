@@ -1,6 +1,6 @@
 // meeting-mate-app/src/hooks/useRoomData.ts
 import { useState, useEffect, useCallback } from 'react';
-import { ref, onValue, set, push, get } from 'firebase/database';
+import { ref, onValue, set, push, get, update } from 'firebase/database';
 import { database as db } from '@/firebase';
 import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession } from '@/types/data';
 import { useAuth } from '@/contexts/AuthContext';
@@ -355,24 +355,41 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     const sessionId = newSessionRef.key;
     if (!sessionId) return null;
 
+    const sessionName = name || `セッション ${sessions.length + 1}`;
+    const startedAt = new Date().toISOString();
     const sessionData = {
-      name: name || `セッション ${sessions.length + 1}`,
-      startedAt: new Date().toISOString(),
+      name: sessionName,
+      startedAt,
       endedAt: null,
-      status: "active",
+      status: "active" as const,
       last_llm_processed_message_count: 0,
       is_llm_processing: false,
     };
 
-    await set(newSessionRef, sessionData);
+    const indexEntry = {
+      roomId,
+      roomName: projectTitle,
+      name: sessionName,
+      startedAt,
+      endedAt: null,
+      status: "active" as const,
+    };
 
-    // currentSessionId を更新
-    const currentRef = ref(firebaseDb, `rooms/${roomId}/currentSessionId`);
-    await set(currentRef, sessionId);
+    const updates: Record<string, unknown> = {
+      [`rooms/${roomId}/sessions/${sessionId}`]: sessionData,
+      [`rooms/${roomId}/currentSessionId`]: sessionId,
+    };
+    // Security Rules 上、自分以外の userSessions/{uid} は書けない。
+    // 他参加者の index は各自の useUserSessionsSync で reconcile される。
+    if (authCurrentUser?.uid) {
+      updates[`userSessions/${authCurrentUser.uid}/${sessionId}`] = indexEntry;
+    }
+
+    await update(ref(firebaseDb), updates);
     setCurrentSessionId(sessionId);
 
     return sessionId;
-  }, [roomId, sessions.length]);
+  }, [roomId, sessions.length, projectTitle, authCurrentUser]);
 
   // セッション切替
   const switchSession = useCallback((sessionId: string) => {
@@ -391,11 +408,17 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     const firebaseDb = db();
     if (!firebaseDb) return;
 
-    // status と endedAt を更新
-    const statusRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/status`);
-    const endedRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/endedAt`);
-    await set(statusRef, "ended");
-    await set(endedRef, new Date().toISOString());
+    // status と endedAt を更新（rooms と自分の userSessions を atomic に同期）
+    const endedAt = new Date().toISOString();
+    const updates: Record<string, unknown> = {
+      [`rooms/${roomId}/sessions/${sessionId}/status`]: "ended",
+      [`rooms/${roomId}/sessions/${sessionId}/endedAt`]: endedAt,
+    };
+    if (authCurrentUser?.uid) {
+      updates[`userSessions/${authCurrentUser.uid}/${sessionId}/status`] = "ended";
+      updates[`userSessions/${authCurrentUser.uid}/${sessionId}/endedAt`] = endedAt;
+    }
+    await update(ref(firebaseDb), updates);
 
     // バックエンドで要約生成+RAG保存をトリガー (fire-and-forget)
     fetch("/api/sessions/end", {
@@ -406,7 +429,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
 
     // 新セッションを自動作成して切替
     await createSession();
-  }, [roomId, createSession]);
+  }, [roomId, createSession, authCurrentUser]);
 
   // セッション名変更
   const renameSession = useCallback((sessionId: string, newName: string) => {
@@ -414,9 +437,14 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     const firebaseDb = db();
     if (!firebaseDb) return;
 
-    const nameRef = ref(firebaseDb, `rooms/${roomId}/sessions/${sessionId}/name`);
-    set(nameRef, newName);
-  }, [roomId]);
+    const updates: Record<string, unknown> = {
+      [`rooms/${roomId}/sessions/${sessionId}/name`]: newName,
+    };
+    if (authCurrentUser?.uid) {
+      updates[`userSessions/${authCurrentUser.uid}/${sessionId}/name`] = newName;
+    }
+    update(ref(firebaseDb), updates);
+  }, [roomId, authCurrentUser]);
 
   // セッション削除
   const deleteSession = useCallback(async (sessionId: string) => {
@@ -458,6 +486,30 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       }
     }
   }, [authCurrentUser, participants, pageCurrentUser]);
+
+  // userSessions/{myUid} を現在のルームのセッション一覧で reconcile
+  // 他の参加者が作成/更新したセッションや、初回ルーム参加時のバックフィルをカバー
+  useEffect(() => {
+    if (!roomId || !authCurrentUser?.uid || sessions.length === 0) return;
+    const firebaseDb = db();
+    if (!firebaseDb) return;
+
+    const uid = authCurrentUser.uid;
+    const updates: Record<string, unknown> = {};
+    sessions.forEach(s => {
+      updates[`userSessions/${uid}/${s.id}`] = {
+        roomId,
+        roomName: projectTitle,
+        name: s.name,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        status: s.status,
+      };
+    });
+    update(ref(firebaseDb), updates).catch(err =>
+      console.error("[useRoomData] userSessions reconciliation failed:", err)
+    );
+  }, [roomId, authCurrentUser, sessions, projectTitle]);
 
   // ルーム参加時にセッションが無ければ初期セッションを作成
   useEffect(() => {

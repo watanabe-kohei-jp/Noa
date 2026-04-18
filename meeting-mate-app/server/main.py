@@ -539,6 +539,10 @@ async def delete_session_endpoint(room_id: str, session_id: str):
     if summary_status == "processing":
         raise HTTPException(status_code=409, detail="要約生成中のため削除できません。完了後に再試行してください。")
 
+    # 参加者全員の userSessions インデックスを取得（削除前に取得しないと特定不能）
+    participants = db.reference(f"rooms/{room_id}/participants").get() or {}
+    participant_uids = list(participants.keys()) if isinstance(participants, dict) else []
+
     # ChromaDB から削除
     from meeting_memory import get_meeting_memory
     memory = get_meeting_memory()
@@ -546,6 +550,13 @@ async def delete_session_endpoint(room_id: str, session_id: str):
 
     # Firebase から削除
     session_ref.delete()
+
+    # userSessions (ユーザー横断インデックス) からも削除
+    for uid in participant_uids:
+        try:
+            db.reference(f"userSessions/{uid}/{session_id}").delete()
+        except Exception as e:
+            logger.warning(f"Failed to delete userSessions/{uid}/{session_id}: {e}")
 
     # mediaArchive からも削除
     try:

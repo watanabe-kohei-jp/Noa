@@ -64,6 +64,17 @@ export interface MeetingSession {
   status: "active" | "ended";
 }
 
+/** ユーザー横断セッションインデックス (userSessions/{uid}/{sessionId}) */
+export interface UserSessionIndex {
+  id: string;
+  roomId: string;
+  roomName: string;
+  name: string;
+  startedAt: string;
+  endedAt: string | null;
+  status: "active" | "ended";
+}
+
 export type CalendarLinkItem = {
   id: string;
   summary: string;
