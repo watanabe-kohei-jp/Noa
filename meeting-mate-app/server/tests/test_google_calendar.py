@@ -25,8 +25,26 @@ class FormatGcalDatetimeTests(unittest.TestCase):
     def test_datetime_with_space_separator(self):
         self.assertEqual(_format_gcal_datetime("2026-04-15 09:00"), "20260415T090000")
 
-    def test_passthrough_on_unknown_format(self):
-        self.assertEqual(_format_gcal_datetime("next monday"), "next monday")
+    def test_raises_on_unparseable_input(self):
+        with self.assertRaises(ValueError):
+            _format_gcal_datetime("next monday")
+
+    def test_datetime_with_jst_offset(self):
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T14:30:00+09:00"), "20260415T143000"
+        )
+
+    def test_datetime_with_utc_z_converts_to_jst(self):
+        # UTC 05:30 → JST 14:30
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T05:30:00Z"), "20260415T143000"
+        )
+
+    def test_datetime_with_other_offset_converts_to_jst(self):
+        # EST(-05:00) 00:00 → JST 14:00
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T00:00:00-05:00"), "20260415T140000"
+        )
 
 
 class HandleGoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +116,34 @@ class HandleGoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
         }, {})
 
         self.assertIn("dates=20260415T140000", result["calendar_url"])
+
+    async def test_ctz_param_in_url(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "2026-04-15T14:00",
+        }, {})
+
+        self.assertIn("ctz=Asia%2FTokyo", result["calendar_url"])
+
+    async def test_timezone_aware_input_normalized(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "2026-04-15T14:30:00+09:00",
+            "end_time": "2026-04-15T15:30:00+09:00",
+        }, {})
+
+        self.assertTrue(result["success"])
+        self.assertIn("dates=20260415T143000%2F20260415T153000", result["calendar_url"])
+        self.assertIn("ctz=Asia%2FTokyo", result["calendar_url"])
+
+    async def test_unparseable_start_time_returns_failure(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "next monday",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertIn("フォーマット", result["message"])
 
 
 if __name__ == "__main__":

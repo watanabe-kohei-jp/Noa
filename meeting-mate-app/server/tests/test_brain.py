@@ -128,5 +128,26 @@ class GenerateDiagramRetryTests(unittest.IsolatedAsyncioTestCase):
         mock_llm.assert_awaited_once()
 
 
+class HandleGetCurrentTimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_timezone_aware_iso(self):
+        result = await execute_tool("get_current_time", {}, {})
+
+        self.assertIn("datetime", result)
+        self.assertIn("+09:00", result["datetime"])
+
+    async def test_timezone_field_is_tokyo(self):
+        result = await execute_tool("get_current_time", {}, {})
+
+        self.assertEqual(result["timezone"], "Asia/Tokyo")
+
+    async def test_formatted_is_japanese(self):
+        result = await execute_tool("get_current_time", {}, {})
+
+        formatted = result["formatted"]
+        self.assertIn("年", formatted)
+        self.assertIn("月", formatted)
+        self.assertIn("日", formatted)
+
+
 if __name__ == "__main__":
     unittest.main()

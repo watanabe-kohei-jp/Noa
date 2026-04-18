@@ -12,3 +12,4 @@ aiohttp
 google-cloud-speech
 chromadb
 google-genai
+tzdata
