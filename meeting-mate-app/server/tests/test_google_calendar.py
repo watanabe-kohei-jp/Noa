@@ -25,8 +25,32 @@ class FormatGcalDatetimeTests(unittest.TestCase):
     def test_datetime_with_space_separator(self):
         self.assertEqual(_format_gcal_datetime("2026-04-15 09:00"), "20260415T090000")
 
-    def test_passthrough_on_unknown_format(self):
-        self.assertEqual(_format_gcal_datetime("next monday"), "next monday")
+    def test_raises_on_unparseable_input(self):
+        with self.assertRaises(ValueError):
+            _format_gcal_datetime("next monday")
+
+    def test_datetime_with_jst_offset(self):
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T14:30:00+09:00"), "20260415T143000"
+        )
+
+    def test_datetime_with_utc_z_converts_to_jst(self):
+        # UTC 05:30 → JST 14:30
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T05:30:00Z"), "20260415T143000"
+        )
+
+    def test_datetime_with_other_offset_converts_to_jst(self):
+        # EST(-05:00) 00:00 → JST 14:00
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T00:00:00-05:00"), "20260415T140000"
+        )
+
+    def test_utc_to_jst_rolls_over_date(self):
+        # UTC 2026-04-15T20:00 → JST 2026-04-16T05:00 (日付が繰り上がる)
+        self.assertEqual(
+            _format_gcal_datetime("2026-04-15T20:00:00Z"), "20260416T050000"
+        )
 
 
 class HandleGoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +122,63 @@ class HandleGoogleCalendarCreateTests(unittest.IsolatedAsyncioTestCase):
         }, {})
 
         self.assertIn("dates=20260415T140000", result["calendar_url"])
+
+    async def test_ctz_param_in_url(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "2026-04-15T14:00",
+        }, {})
+
+        self.assertIn("ctz=Asia%2FTokyo", result["calendar_url"])
+
+    async def test_timezone_aware_input_normalized(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "2026-04-15T14:30:00+09:00",
+            "end_time": "2026-04-15T15:30:00+09:00",
+        }, {})
+
+        self.assertTrue(result["success"])
+        self.assertIn("dates=20260415T143000%2F20260415T153000", result["calendar_url"])
+        self.assertIn("ctz=Asia%2FTokyo", result["calendar_url"])
+
+    async def test_unparseable_start_time_returns_failure(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "next monday",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertIn("フォーマット", result["message"])
+
+    async def test_error_message_does_not_reflect_user_input(self):
+        """UI 向けメッセージに生のユーザー入力を含めない"""
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "malicious<script>",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertNotIn("malicious", result["message"])
+
+    async def test_end_time_without_start_time_fails(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "end_time": "2026-04-15T15:00",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertIn("start_time", result["message"])
+
+    async def test_valid_start_with_invalid_end_returns_failure(self):
+        result = await handle_google_calendar_create({
+            "summary": "test",
+            "start_time": "2026-04-15T14:00",
+            "end_time": "next monday",
+        }, {})
+
+        self.assertFalse(result["success"])
+        self.assertIn("フォーマット", result["message"])
 
 
 if __name__ == "__main__":

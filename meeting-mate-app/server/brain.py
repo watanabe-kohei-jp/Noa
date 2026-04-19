@@ -13,6 +13,7 @@ import logging
 import math
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from config import BRAIN_LLM_MODEL, DEEP_ANALYSIS_MODEL, DEFAULT_GEMINI_API_KEY, get_default_api_key
 from knowledge_base import get_knowledge_base
@@ -23,6 +24,8 @@ from meeting_memory import get_meeting_memory
 from integrations.registry import ToolDefinition, registry as _registry
 
 logger = logging.getLogger(__name__)
+
+JST = ZoneInfo("Asia/Tokyo")
 
 kb = get_knowledge_base()
 
@@ -202,9 +205,9 @@ async def _handle_calculate(args: dict, meeting_context: dict) -> dict:
 
 
 async def _handle_get_current_time(args: dict, meeting_context: dict) -> dict:
-    now = datetime.now()
+    now = datetime.now(JST)
     formatted = now.strftime("%Y年%m月%d日 %H時%M分%S秒")
-    return {"datetime": now.isoformat(), "formatted": formatted, "timezone": "Asia/Tokyo"}
+    return {"datetime": now.isoformat(), "formatted": formatted, "timezone": JST.key}
 
 
 async def _handle_get_meeting_context(args: dict, meeting_context: dict) -> dict:
@@ -574,8 +577,8 @@ def _register_builtin_tools() -> None:
     ))
     _registry.register(ToolDefinition(
         name="google_calendar_create",
-        description="Google Calendar に予定を追加するURLを生成（会議のスケジューリング、フォローアップの日程設定等）",
-        args_description='{{{{ "summary": "予定のタイトル", "start_time": "YYYY-MM-DDTHH:MM", "end_time": "YYYY-MM-DDTHH:MM", "description": "詳細（省略可）", "location": "場所（省略可）" }}}}',
+        description="Google Calendar に予定を追加するURLを生成（会議のスケジューリング、フォローアップの日程設定等）。start_time / end_time は Asia/Tokyo 前提。",
+        args_description='{{{{ "summary": "予定のタイトル", "start_time": "YYYY-MM-DDTHH:MM（JST naive）または YYYY-MM-DDTHH:MM:SS+09:00（RFC3339 offset 付き）", "end_time": "start_time と同形式", "description": "詳細（省略可）", "location": "場所（省略可）" }}}}',
         handler=handle_google_calendar_create,
         read_only=True,
         follow_up_allowed=False,
