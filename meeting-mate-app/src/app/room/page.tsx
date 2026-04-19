@@ -24,7 +24,7 @@ import OverviewDiagramPanel from '@/app/room/components/OverviewDiagramPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import { participantColors, getParticipantColorIndex } from '@/app/room/components/ParticipantsList';
 import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
-import { exportDiagramAsSvg, exportDiagramAsPng, exportDiagramAsPdf, exportTextData } from '@/lib/export';
+import { exportDiagramAsSvg, exportDiagramAsPng, exportDiagramAsPdf, exportTextData, formatCalendarLinksAsJson } from '@/lib/export';
 import type { ExportOption } from '@/components/export/ExportDropdown';
 import ExportButton from '@/components/export/ExportButton';
 import ExportDialog from '@/components/export/ExportDialog';
@@ -631,7 +631,8 @@ export default function RoomPage() {
           label: 'JSON でダウンロード',
           format: 'json' as const,
           onClick: () => {
-            const blob = new Blob([JSON.stringify(calendarLinks, null, 2)], { type: 'application/json' });
+            const content = JSON.stringify(formatCalendarLinksAsJson(calendarLinks), null, 2);
+            const blob = new Blob([content], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -1241,7 +1242,8 @@ export default function RoomPage() {
           currentAgenda,
           suggestedNextTopics,
           overviewDiagram: overviewDiagramData,
-        } as ReportData}
+          calendarLinks,
+        } satisfies ReportData}
       />
     </div>
   );

@@ -45,7 +45,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, currentThe
   };
 
   const formatOptions: { format: ReportFormat; label: string; description: string }[] = [
-    { format: 'markdown', label: 'Markdown', description: '議題・概要図・タスク・ノート・トランスクリプトを1つのファイルに' },
+    { format: 'markdown', label: 'Markdown', description: '議題・概要図・タスク・ノート・カレンダーリンク・トランスクリプトを1つのファイルに' },
     { format: 'json', label: 'JSON', description: '構造化データとして出力（プログラム連携用）' },
   ];
 
@@ -79,6 +79,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, currentThe
             <li>トランスクリプト: {reportData.transcript.length} 件</li>
             <li>タスク: {reportData.tasks.length} 件</li>
             <li>ノート: {reportData.notes.length} 件</li>
+            <li>カレンダーリンク: {reportData.calendarLinks.length} 件</li>
             <li>概要図: {reportData.overviewDiagram ? 'あり' : 'なし'}</li>
             <li>議題: {reportData.currentAgenda?.mainTopic ? 'あり' : 'なし'}</li>
           </ul>
