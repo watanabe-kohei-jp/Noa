@@ -7,6 +7,7 @@
  */
 
 import { downloadBlob, downloadText, sanitizeFileName, getTimestamp } from './download-utils';
+import { renderMermaid, neutralizeDocOklch } from '@/lib/mermaid';
 
 /** テーマに応じた背景色を返す */
 function getBackgroundColor(theme: 'light' | 'dark' | 'modern'): string {
@@ -26,38 +27,12 @@ async function renderCleanSvg(
   definition: string,
   theme: 'light' | 'dark' | 'modern'
 ): Promise<string> {
-  const mermaid = (await import('mermaid')).default;
-  const mermaidTheme = theme === 'dark' || theme === 'modern' ? 'dark' : 'neutral';
-  const isDarkTheme = theme === 'dark' || theme === 'modern';
-
-  mermaid.initialize({
-    startOnLoad: false,
-    theme: mermaidTheme,
-    securityLevel: 'strict',
-    fontFamily: 'Arial, sans-serif',
-    flowchart: {
-      useMaxWidth: true,
-      htmlLabels: false, // foreignObject を回避
-    },
-    themeVariables: {
-      fontFamily: 'Arial, sans-serif',
-      ...(isDarkTheme && {
-        primaryColor: '#374151',
-        primaryTextColor: '#f3f4f6',
-        primaryBorderColor: '#6b7280',
-        lineColor: '#9ca3af',
-        secondaryColor: '#4b5563',
-        tertiaryColor: '#1f2937',
-        background: '#1f2937',
-        mainBkg: '#374151',
-        secondBkg: '#4b5563',
-        tertiaryBkg: '#6b7280',
-      }),
-    },
+  const { svg } = await renderMermaid({
+    theme,
+    htmlLabels: false, // foreignObject を回避
+    definition,
+    elementId: `export-svg-${Date.now()}`,
   });
-
-  const tempId = `export-svg-${Date.now()}`;
-  const { svg } = await mermaid.render(tempId, definition);
   return svg;
 }
 
@@ -96,11 +71,13 @@ export async function exportDiagramAsPng(
 ): Promise<void> {
   const { default: html2canvas } = await import('html2canvas');
 
+  // onclone で clone 側の :root から oklch() 変数を除去。live DOM は触らない。
   const canvas = await html2canvas(containerElement, {
     scale: 2,
     backgroundColor: getBackgroundColor(theme),
     useCORS: false,
     logging: false,
+    onclone: (clonedDoc) => neutralizeDocOklch(clonedDoc),
   });
 
   const blob = await new Promise<Blob>((resolve, reject) => {
@@ -133,6 +110,7 @@ export async function exportDiagramAsPdf(
     backgroundColor: getBackgroundColor(theme),
     useCORS: false,
     logging: false,
+    onclone: (clonedDoc) => neutralizeDocOklch(clonedDoc),
   });
 
   const imgData = canvas.toDataURL('image/png');
