@@ -6,6 +6,7 @@
  */
 
 import { downloadText, sanitizeFileName, getTimestamp } from './download-utils';
+import { isSafeCalendarUrl } from '@/lib/url-safety';
 import type { TranscriptEntry, TodoItem, NoteItem, CurrentAgenda, CalendarLinkItem } from '@/types/data';
 
 // ============================================================
@@ -202,13 +203,6 @@ export function formatAgendaAsJson(agenda: CurrentAgenda | null, suggestedTopics
 // ============================================================
 // カレンダーリンク
 // ============================================================
-
-const SAFE_URL_SCHEMES = /^(https?:|mailto:)/i;
-
-function isSafeCalendarUrl(url: string | undefined): boolean {
-  if (!url) return false;
-  return SAFE_URL_SCHEMES.test(url.trim());
-}
 
 function escapeMarkdownLinkText(text: string): string {
   return text

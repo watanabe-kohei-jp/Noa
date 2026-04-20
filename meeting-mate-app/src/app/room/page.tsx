@@ -32,7 +32,7 @@ import type { ReportData } from '@/lib/export/report-formatter';
 
 // 型定義とユーティリティ関数のインポート
 import {
-  TranscriptEntry, PanelId, CalendarLinkItem, generateUniqueId
+  TranscriptEntry, PanelId
 } from '@/types/data';
 import type { LivePanelAPI } from '@/types/live-api';
 
@@ -79,9 +79,6 @@ export default function RoomPage() {
   // Mermaid 図エクスポート用 ref
   const diagramRef = useRef<MermaidDiagramHandle>(null);
 
-  // カレンダーリンク
-  const [calendarLinks, setCalendarLinks] = useState<CalendarLinkItem[]>([]);
-
   // 一括エクスポートダイアログ
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
 
@@ -107,6 +104,7 @@ export default function RoomPage() {
     participants,
     notes,
     tasks,
+    calendarLinks,
     currentAgenda,
     suggestedNextTopics,
   projectTitle,
@@ -1103,16 +1101,6 @@ export default function RoomPage() {
                 sharedStream={sharedStream}
                 currentSessionId={currentSessionId}
                 onReady={(api) => { livePanelApiRef.current = api; }}
-                onCalendarLink={(link) => {
-                  setCalendarLinks(prev => [...prev, {
-                    id: generateUniqueId(),
-                    summary: link.summary,
-                    calendarUrl: link.calendarUrl,
-                    startTime: link.startTime,
-                    endTime: link.endTime,
-                    timestamp: new Date().toISOString(),
-                  }]);
-                }}
               />
               <div className="border-l border-gray-300 dark:border-gray-600 h-6 mx-1" />
               {/* TTS再生/停止ボタン */}

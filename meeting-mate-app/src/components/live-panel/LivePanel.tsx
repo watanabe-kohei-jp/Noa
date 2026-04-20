@@ -34,6 +34,7 @@ import { useProactiveMonitor } from "../../hooks/useProactiveMonitor";
 import { useMediaPersistence } from "../../hooks/useMediaPersistence";
 import { useMediaRecorder } from "../../hooks/useMediaRecorder";
 import ProactiveSuggestionBanner from "./ProactiveSuggestionBanner";
+import { isSafeCalendarUrl } from "../../lib/url-safety";
 
 // Firebase
 import { ref, push, set } from "firebase/database";
@@ -49,7 +50,6 @@ interface LivePanelInnerProps {
   sharedStream?: MediaStream | null;
   currentSessionId?: string | null;
   onReady?: (api: LivePanelAPI) => void;
-  onCalendarLink?: (link: { summary: string; calendarUrl: string; startTime?: string; endTime?: string }) => void;
 }
 
 function LivePanelInner({
@@ -58,7 +58,6 @@ function LivePanelInner({
   sharedStream,
   currentSessionId,
   onReady,
-  onCalendarLink,
 }: LivePanelInnerProps) {
   const { client, setConfig, connected, connectionState, connect, disconnect, volume } =
     useLiveAPIContext();
@@ -137,8 +136,30 @@ function LivePanelInner({
         mermaidDefinition: mermaidCode,
       });
     },
-    onCalendarLink: onCalendarLink || undefined,
-  }), [roomId, currentSessionId, onCalendarLink]);
+    onCalendarLink: (link: { summary: string; calendarUrl: string; startTime?: string; endTime?: string }) => {
+      if (!roomId || !currentSessionId) {
+        console.warn("[LivePanel] calendar link skipped: no sessionId");
+        return;
+      }
+      if (!isSafeCalendarUrl(link.calendarUrl)) {
+        console.warn("[LivePanel] calendar link rejected: unsafe URL", link.calendarUrl);
+        return;
+      }
+      const db = getDatabase();
+      if (!db) return;
+      const linksRef = ref(db, `rooms/${roomId}/sessions/${currentSessionId}/calendarLinks`);
+      const newRef = push(linksRef);
+      const linkId = newRef.key!;
+      set(newRef, {
+        id: linkId,
+        summary: link.summary,
+        calendarUrl: link.calendarUrl,
+        startTime: link.startTime || "",
+        endTime: link.endTime || "",
+        timestamp: new Date().toISOString(),
+      }).catch((err) => console.error("[LivePanel] calendar link save failed:", err));
+    },
+  }), [roomId, currentSessionId]);
   const { isProcessing, requestBrain, abortAll: abortBrain } = useBrain(client, connected, roomData, brainCallbacks, thinkingQueue, roomId, currentSessionId);
 
   // Media persistence hooks
@@ -924,7 +945,6 @@ interface LivePanelProps {
   sharedStream?: MediaStream | null;
   currentSessionId?: string | null;
   onReady?: (api: LivePanelAPI) => void;
-  onCalendarLink?: (link: { summary: string; calendarUrl: string; startTime?: string; endTime?: string }) => void;
 }
 
 export default function LivePanel({
@@ -933,7 +953,6 @@ export default function LivePanel({
   sharedStream,
   currentSessionId,
   onReady,
-  onCalendarLink,
 }: LivePanelProps) {
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
@@ -980,7 +999,6 @@ export default function LivePanel({
           sharedStream={sharedStream}
           currentSessionId={currentSessionId}
           onReady={onReady}
-          onCalendarLink={onCalendarLink}
         />
       </ThinkingQueueProvider>
     </LiveAPIProvider>

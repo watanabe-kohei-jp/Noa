@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ref, onValue, set, push, get } from 'firebase/database';
 import { database as db } from '@/firebase';
-import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession } from '@/types/data';
+import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession, CalendarLinkItem } from '@/types/data';
 import { useAuth } from '@/contexts/AuthContext';
 
 interface UseRoomDataResult {
@@ -11,6 +11,7 @@ interface UseRoomDataResult {
   transcript: TranscriptEntry[];
   tasks: TodoItem[];
   notes: NoteItem[];
+  calendarLinks: CalendarLinkItem[];
   currentAgenda: CurrentAgenda | null;
   suggestedNextTopics: string[];
   projectTitle: string;
@@ -43,6 +44,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [tasks, setTasks] = useState<TodoItem[]>([]);
   const [notes, setNotes] = useState<NoteItem[]>([]);
+  const [calendarLinks, setCalendarLinks] = useState<CalendarLinkItem[]>([]);
   const [currentAgenda, setCurrentAgenda] = useState<CurrentAgenda | null>(null);
   const [suggestedNextTopics, setSuggestedNextTopics] = useState<string[]>([]);
   const [projectTitle, setProjectTitle] = useState<string>("会議タイトル");
@@ -80,6 +82,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       setTranscript([]);
       setTasks([]);
       setNotes([]);
+      setCalendarLinks([]);
       setCurrentAgenda(null);
       setSuggestedNextTopics([]);
       setProjectTitle("会議タイトル");
@@ -251,6 +254,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     setTranscript([]);
     setTasks([]);
     setNotes([]);
+    setCalendarLinks([]);
     setCurrentAgenda(null);
     setSuggestedNextTopics([]);
     setOverviewDiagramData(null);
@@ -267,6 +271,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
         setTranscript([]);
         setTasks([]);
         setNotes([]);
+        setCalendarLinks([]);
         setCurrentAgenda(null);
         setSuggestedNextTopics([]);
         setOverviewDiagramData(null);
@@ -315,6 +320,10 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       setTasks(newTasks as TodoItem[]);
       const newNotes = data.notes && typeof data.notes === 'object' ? Object.values(data.notes) : [];
       setNotes(newNotes as NoteItem[]);
+      const newCalendarLinks = data.calendarLinks && typeof data.calendarLinks === 'object'
+        ? Object.values(data.calendarLinks)
+        : [];
+      setCalendarLinks(newCalendarLinks as CalendarLinkItem[]);
       setCurrentAgenda((data.currentAgenda as CurrentAgenda) || null);
 
       const suggestedTopicsData = data.suggestedNextTopics;
@@ -484,6 +493,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     transcript,
     tasks,
     notes,
+    calendarLinks,
     currentAgenda,
     suggestedNextTopics,
     projectTitle,
