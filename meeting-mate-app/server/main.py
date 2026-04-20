@@ -1190,6 +1190,71 @@ class CreateRoomRequest(BaseModel):
         return v
 
 
+def _persist_room_api_keys_and_config(
+    room_id: str, uid: str, request_data: "CreateRoomRequest", room_ref
+) -> str:
+    """APIキー / ルーム設定 / 有効期限を保存し、apiKeyExpiresAt を返す。
+    既存キーがあれば上書きする。失敗時は HTTPException(500) を上げる。
+    """
+    duration_hours = request_data.api_key_duration_hours or 24
+
+    if request_data.api_keys:
+        for provider, key in request_data.api_keys.items():
+            if key and key.strip():
+                ok = api_key_manager.store_provider_api_key(
+                    room_id, provider, key.strip(), uid, duration_hours)
+                if not ok:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to persist API key for provider '{provider}'")
+        logger.info(f"Room {room_id}: Multi-provider API keys stored.")
+
+        # cleanup_expired_keys は room_secrets/{room_id} 直下の legacy expires_at が
+        # 期限切れだとノード全体を削除するため、新形式に切り替えた時点で legacy フィールドを除去
+        legacy_ref = db.reference(f"room_secrets/{room_id}")
+        legacy_data = legacy_ref.get() or {}
+        legacy_updates = {}
+        if 'encrypted_api_key' in legacy_data:
+            legacy_updates['encrypted_api_key'] = None
+        if 'expires_at' in legacy_data:
+            legacy_updates['expires_at'] = None
+        if legacy_updates:
+            legacy_ref.update(legacy_updates)
+            logger.info(f"Room {room_id}: cleared legacy api key fields.")
+
+    elif request_data.llm_api_key:
+        ok = api_key_manager.store_room_api_key(
+            room_id, request_data.llm_api_key, uid, duration_hours)
+        if not ok:
+            raise HTTPException(
+                status_code=500, detail="Failed to persist legacy API key")
+        logger.info(f"Room {room_id}: Legacy single API key stored.")
+
+    room_config = {}
+    if request_data.agent_models:
+        room_config["agent_models"] = request_data.agent_models
+    if request_data.default_model:
+        room_config["default_model"] = request_data.default_model
+    if request_data.stt_provider:
+        room_config["stt_provider"] = request_data.stt_provider
+    if request_data.tts_provider:
+        room_config["tts_provider"] = request_data.tts_provider
+    if room_config:
+        ok = api_key_manager.store_room_config(room_id, room_config)
+        if not ok:
+            raise HTTPException(
+                status_code=500, detail="Failed to persist room config")
+
+    if request_data.llm_models:
+        db.reference(f"room_secrets/{room_id}").update(
+            {'llm_models': request_data.llm_models})
+
+    api_key_expires_at = (datetime.utcnow() + timedelta(hours=duration_hours)).isoformat() + "Z"
+    room_ref.child("apiKeyExpiresAt").set(api_key_expires_at)
+    room_ref.child("apiKeyDurationHours").set(duration_hours)
+    return api_key_expires_at
+
+
 @app.post("/create_room", summary="Create a new meeting room")
 async def create_room_endpoint(request_data: CreateRoomRequest):
     room_id = request_data.room_id
@@ -1205,15 +1270,28 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
         display_name = request_data.speakerName or user_record.display_name or user_record.email or f"user_{uid[:5]}"
 
         room_ref = db.reference(f"rooms/{room_id}")
-        if room_ref.get():
+        existing_room = room_ref.get()
+        if existing_room:
+            is_owner = existing_room.get("ownerId") == uid
+            has_new_keys = bool(request_data.api_keys) or bool(request_data.llm_api_key)
+
+            if is_owner and has_new_keys:
+                _persist_room_api_keys_and_config(room_id, uid, request_data, room_ref)
+                logger.info(f"Room {room_id}: API keys refreshed by owner.")
+                return {
+                    "status": "success",
+                    "message": "Room API keys refreshed.",
+                    "data": room_ref.get(),
+                }
+
             if room_ref.child(f"participants/{uid}").get():
-                return {"status": "success", "message": "Room already exists and you are a participant.", "data": room_ref.get()}
-            else:
-                participant_role = "Representative" if request_data.representativeMode else "Creator"
-                participant_data = {"name": display_name, "role": participant_role,
-                                    "joinedAt": datetime.utcnow().isoformat() + "Z"}
-                room_ref.child(f"participants/{uid}").set(participant_data)
-                return {"status": "success", "message": "Room already exists, added you as a participant.", "data": room_ref.get()}
+                return {"status": "success", "message": "Room already exists and you are a participant.", "data": existing_room}
+
+            participant_role = "Representative" if request_data.representativeMode else "Creator"
+            participant_data = {"name": display_name, "role": participant_role,
+                                "joinedAt": datetime.utcnow().isoformat() + "Z"}
+            room_ref.child(f"participants/{uid}").set(participant_data)
+            return {"status": "success", "message": "Room already exists, added you as a participant.", "data": room_ref.get()}
 
         meeting_subtitle = request_data.meeting_subtitle or ""
 
@@ -1260,49 +1338,11 @@ async def create_room_endpoint(request_data: CreateRoomRequest):
 
         room_ref.set(new_room_data)
 
-        # ================================================================
-        # room_secrets にマルチプロバイダー設定を保存
-        # ================================================================
-        duration_hours = request_data.api_key_duration_hours or 24
-
-        # 新形式: プロバイダー別APIキー
-        if request_data.api_keys:
-            for provider, key in request_data.api_keys.items():
-                if key and key.strip():
-                    api_key_manager.store_provider_api_key(
-                        room_id, provider, key.strip(), uid, duration_hours)
-            logger.info(f"Room {room_id}: Multi-provider API keys stored.")
-
-        # 旧形式互換: 単一APIキー → Geminiキーとして保存
-        elif request_data.llm_api_key:
-            api_key_manager.store_room_api_key(
-                room_id, request_data.llm_api_key, uid, duration_hours)
-            logger.info(f"Room {room_id}: Legacy single API key stored.")
-
-        # ルーム設定を保存
-        room_config = {}
-        if request_data.agent_models:
-            room_config["agent_models"] = request_data.agent_models
-        if request_data.default_model:
-            room_config["default_model"] = request_data.default_model
-        if request_data.stt_provider:
-            room_config["stt_provider"] = request_data.stt_provider
-        if request_data.tts_provider:
-            room_config["tts_provider"] = request_data.tts_provider
-        if room_config:
-            api_key_manager.store_room_config(room_id, room_config)
-
-        # 旧形式互換: llm_models
-        if request_data.llm_models:
-            room_secrets_ref = db.reference(f"room_secrets/{room_id}")
-            room_secrets_ref.update({'llm_models': request_data.llm_models})
-
-        # APIキー期限情報をルームデータにも保存
-        api_key_expires_at = (datetime.utcnow() + timedelta(hours=duration_hours)).isoformat() + "Z"
-        room_ref.child("apiKeyExpiresAt").set(api_key_expires_at)
-        room_ref.child("apiKeyDurationHours").set(duration_hours)
+        _persist_room_api_keys_and_config(room_id, uid, request_data, room_ref)
 
         return {"status": "success", "message": "Room created successfully", "data": new_room_data}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating room {room_id}: {e}", exc_info=True)
         raise HTTPException(
