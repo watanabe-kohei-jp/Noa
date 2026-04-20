@@ -1,6 +1,7 @@
 import React from 'react';
 import { CalendarLinkItem } from '@/types/data';
 import { themes } from '@/constants/themes';
+import { isSafeCalendarUrl } from '@/lib/url-safety';
 import { CalendarPlus, ExternalLink } from 'lucide-react';
 
 interface CalendarLinksPanelProps {
@@ -63,15 +64,25 @@ const CalendarLinksPanel: React.FC<CalendarLinksPanelProps> = ({ calendarLinks, 
                 </p>
               )}
             </div>
-            <a
-              href={link.calendarUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-            >
-              <ExternalLink className="w-3 h-3" />
-              追加
-            </a>
+            {isSafeCalendarUrl(link.calendarUrl) ? (
+              <a
+                href={link.calendarUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              >
+                <ExternalLink className="w-3 h-3" />
+                追加
+              </a>
+            ) : (
+              <span
+                title="無効な URL のため開けません"
+                className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-gray-400 text-white opacity-60 cursor-not-allowed"
+              >
+                <ExternalLink className="w-3 h-3" />
+                追加
+              </span>
+            )}
           </div>
         </div>
       ))}
