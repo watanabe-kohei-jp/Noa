@@ -101,7 +101,7 @@ const MermaidDiagram = React.memo(({ definition }: { definition: string }) => {
   const [diagramId] = useState<string>(`mermaid-diagram-${generateUniqueId()}`);
   const [processedDefinition, setProcessedDefinition] = useState<string>("");
   useEffect(() => { const newDecodedDefinition = definition.replace(/\\n/g, "\n"); setProcessedDefinition(newDecodedDefinition); }, [definition]);
-  useEffect(() => { const renderMermaid = async (currentDefinition: string) => { if (currentDefinition && mermaidContainerRef.current) { setSvgContent(null); setError(null); try { const mermaid = (await import('mermaid')).default; const tempId = `mermaid-temp-${generateUniqueId()}`; const { svg } = await mermaid.render(tempId, currentDefinition); if (svg) setSvgContent(svg); else setError("Mermaid rendering returned no SVG."); } catch (e: unknown) { if (e instanceof Error) setError(e.message); else setError("Failed to render Mermaid diagram."); setSvgContent(null); } } else if (!currentDefinition) { setSvgContent(null); setError(null); } }; renderMermaid(processedDefinition); }, [processedDefinition]);
+  useEffect(() => { const runRender = async (currentDefinition: string) => { if (currentDefinition && mermaidContainerRef.current) { setSvgContent(null); setError(null); try { const { renderMermaid } = await import('@/lib/mermaid'); const tempId = `mermaid-temp-${generateUniqueId()}`; const { svg } = await renderMermaid({ theme: 'light', htmlLabels: true, definition: currentDefinition, elementId: tempId }); if (svg) setSvgContent(svg); else setError("Mermaid rendering returned no SVG."); } catch (e: unknown) { if (e instanceof Error) setError(e.message); else setError("Failed to render Mermaid diagram."); setSvgContent(null); } } else if (!currentDefinition) { setSvgContent(null); setError(null); } }; runRender(processedDefinition); }, [processedDefinition]);
   useEffect(() => { if (svgContent && mermaidContainerRef.current) { const container = mermaidContainerRef.current; container.innerHTML = svgContent; const svgElement = container.querySelector("svg"); if (svgElement) { const d3Svg = d3.select(svgElement); let innerG = d3Svg.select("g"); if (innerG.empty()) { const content = d3Svg.html(); d3Svg.html(`<g>${content}</g>`); innerG = d3Svg.select("g"); } const zoomBehavior = d3.zoom<SVGSVGElement, unknown>().on("zoom", (event) => { innerG.attr("transform", event.transform.toString()); }); d3Svg.call(zoomBehavior); d3Svg.style("max-width", "100%"); d3Svg.style("height", "auto"); } } }, [svgContent]);
   if (error) return <div ref={mermaidContainerRef} className="text-red-500 text-sm p-2 bg-red-50 rounded-md">Error rendering diagram: {error}</div>;
   return (<div ref={mermaidContainerRef} key={diagramId} className="mermaid-diagram-container w-full h-auto flex justify-center items-center overflow-hidden bg-white" style={{ minHeight: '200px', maxHeight: '500px' }}>{!svgContent && !error && <div className="text-slate-500 text-sm">Loading diagram...</div>}</div>);
@@ -196,9 +196,7 @@ export default function MeetingMatePage() {
   }, [currentUser, newTranscriptText, transcript, callBackendApi]);
 
   useEffect(() => {
-    const initializeMermaid = async () => { try { const mermaid = (await import('mermaid')).default; mermaid.initialize({ startOnLoad: false, theme: 'neutral' }); } catch (initError) { console.error("Global Mermaid initialization failed:", initError); } };
-    initializeMermaid();
-    // const timer = setInterval(() => setCurrentTime(new Date().toLocaleString('ja-JP')), 1000); // Moved to ClockDisplay
+    // Mermaid はレンダリングごとに lib/mermaid/render-gateway が初期化するため、グローバル初期化は不要
     const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognitionAPI) {
       const recognitionInstance = new SpeechRecognitionAPI();

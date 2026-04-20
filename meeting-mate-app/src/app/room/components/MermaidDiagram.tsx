@@ -302,48 +302,21 @@ const MermaidDiagram = forwardRef<MermaidDiagramHandle, MermaidDiagramProps>(({ 
   }, [definition]);
 
   useEffect(() => {
-    const renderMermaid = async (currentDefinition: string) => {
+    const runRender = async (currentDefinition: string) => {
       if (currentDefinition && mermaidContainerRef.current) {
         setSvgContent(null);
         setError(null);
         try {
-          const mermaid = (await import('mermaid')).default;
-          
-          // Configure Mermaid for better error handling
-          const mermaidTheme = theme === 'dark' || theme === 'modern' ? 'dark' : 'neutral';
-          const isDarkTheme = theme === 'dark' || theme === 'modern';
-          
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: mermaidTheme,
-            securityLevel: 'strict',
-            fontFamily: 'Arial, sans-serif',
-            flowchart: {
-              useMaxWidth: true,
-              htmlLabels: true
-            },
-            themeVariables: {
-              fontFamily: 'Arial, sans-serif',
-              // ダークテーマの場合の背景色設定
-              ...(isDarkTheme && {
-                primaryColor: '#374151',
-                primaryTextColor: '#f3f4f6',
-                primaryBorderColor: '#6b7280',
-                lineColor: '#9ca3af',
-                secondaryColor: '#4b5563',
-                tertiaryColor: '#1f2937',
-                background: '#1f2937',
-                mainBkg: '#374151',
-                secondBkg: '#4b5563',
-                tertiaryBkg: '#6b7280'
-              })
-            }
-          });
-          
+          const { renderMermaid } = await import('@/lib/mermaid');
           const tempId = `mermaid-temp-${generateUniqueId()}`;
           console.log("MermaidDiagram: Attempting to render with definition:", currentDefinition);
-          
-          const { svg } = await mermaid.render(tempId, currentDefinition);
+
+          const { svg } = await renderMermaid({
+            theme: theme ?? 'light',
+            htmlLabels: true,
+            definition: currentDefinition,
+            elementId: tempId,
+          });
           if (svg) setSvgContent(svg);
           else setError("Mermaid rendering returned no SVG.");
         } catch (e: unknown) {
@@ -381,8 +354,13 @@ const MermaidDiagram = forwardRef<MermaidDiagramHandle, MermaidDiagramProps>(({ 
     class A,B error`;
           
           try {
-            const mermaidForFallback = (await import('mermaid')).default;
-            const { svg: fallbackSvg } = await mermaidForFallback.render(`fallback-${generateUniqueId()}`, fallbackDiagram);
+            const { renderMermaid } = await import('@/lib/mermaid');
+            const { svg: fallbackSvg } = await renderMermaid({
+              theme: theme ?? 'light',
+              htmlLabels: true,
+              definition: fallbackDiagram,
+              elementId: `fallback-${generateUniqueId()}`,
+            });
             if (fallbackSvg) {
               setSvgContent(fallbackSvg);
               setError(`Diagram error: ${errorMessage}`);
@@ -400,7 +378,7 @@ const MermaidDiagram = forwardRef<MermaidDiagramHandle, MermaidDiagramProps>(({ 
         setError(null);
       }
     };
-    renderMermaid(processedDefinition);
+    runRender(processedDefinition);
   }, [processedDefinition, theme]);
 
   useEffect(() => {
