@@ -7,7 +7,7 @@
  */
 
 import { downloadBlob, downloadText, sanitizeFileName, getTimestamp } from './download-utils';
-import { renderMermaid, withMermaidIsolation } from '@/lib/mermaid';
+import { renderMermaid, neutralizeDocOklch } from '@/lib/mermaid';
 
 /** テーマに応じた背景色を返す */
 function getBackgroundColor(theme: 'light' | 'dark' | 'modern'): string {
@@ -71,14 +71,14 @@ export async function exportDiagramAsPng(
 ): Promise<void> {
   const { default: html2canvas } = await import('html2canvas');
 
-  const canvas = await withMermaidIsolation(() =>
-    html2canvas(containerElement, {
-      scale: 2,
-      backgroundColor: getBackgroundColor(theme),
-      useCORS: false,
-      logging: false,
-    })
-  );
+  // onclone で clone 側の :root から oklch() 変数を除去。live DOM は触らない。
+  const canvas = await html2canvas(containerElement, {
+    scale: 2,
+    backgroundColor: getBackgroundColor(theme),
+    useCORS: false,
+    logging: false,
+    onclone: (clonedDoc) => neutralizeDocOklch(clonedDoc),
+  });
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
@@ -105,14 +105,13 @@ export async function exportDiagramAsPdf(
     import('jspdf'),
   ]);
 
-  const canvas = await withMermaidIsolation(() =>
-    html2canvas(containerElement, {
-      scale: 2,
-      backgroundColor: getBackgroundColor(theme),
-      useCORS: false,
-      logging: false,
-    })
-  );
+  const canvas = await html2canvas(containerElement, {
+    scale: 2,
+    backgroundColor: getBackgroundColor(theme),
+    useCORS: false,
+    logging: false,
+    onclone: (clonedDoc) => neutralizeDocOklch(clonedDoc),
+  });
 
   const imgData = canvas.toDataURL('image/png');
   const imgWidth = canvas.width;

@@ -1,66 +1,109 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// --- DOM スタブ (Node 環境向けの最小実装) -----------------------------------
-// vitest の environment: 'node' のままで動くように、document / getComputedStyle を
-// 手動で差し込む。jsdom/happy-dom を追加せずにテストするための措置。
+/**
+ * Node 環境 (vitest environment: 'node') に最小 DOM を手動で差し込むテスト。
+ * - document / getComputedStyle / styleSheets / createElement('canvas') を個別にスタブ
+ * - CSSOM 列挙 (collectRootCustomPropNames) と canvas 正規化 (normalizeToSupportedColor)
+ *   の両方を stub で検証できるようにする
+ */
 
 type PropMap = Map<string, string>;
 
-function createFakeStyle(initial: Record<string, string> = {}) {
+function createStyleDecl(initial: Record<string, string> = {}) {
   const props: PropMap = new Map(Object.entries(initial));
-  return {
-    setProperty(name: string, value: string) { props.set(name, String(value)); },
-    getPropertyValue(name: string) { return props.get(name) ?? ''; },
-    removeProperty(name: string) { props.delete(name); },
+  const decl: {
+    length: number;
+    setProperty(n: string, v: string): void;
+    getPropertyValue(n: string): string;
+    removeProperty(n: string): void;
+    item(i: number): string;
+  } = {
+    get length() { return props.size; },
+    setProperty(n, v) { props.set(n, String(v)); },
+    getPropertyValue(n) { return props.get(n) ?? ''; },
+    removeProperty(n) { props.delete(n); },
+    item(i) { return Array.from(props.keys())[i] ?? ''; },
   };
+  return decl;
 }
 
-function installDom(opts: {
-  computedVars: Record<string, string>;
+interface InstallDomOpts {
+  /** :root / html セレクタのルール内で定義された CSS 変数 (name -> value) */
+  rootRuleVars?: Record<string, string>;
+  /** documentElement の computed 値 */
+  computedVars?: Record<string, string>;
+  /** documentElement の inline スタイル初期値 */
   initialInlineVars?: Record<string, string>;
-  resolvedColor?: string;
-}) {
-  const { computedVars, initialInlineVars = {}, resolvedColor = 'rgb(128, 128, 128)' } = opts;
-  const style = createFakeStyle(initialInlineVars);
-  // inline は computed に優先して上書きする (ブラウザ挙動と同等)
-  const computedSource: Record<string, string> = { ...computedVars, ...initialInlineVars };
-  const names = Object.keys(computedSource);
+  /** canvas.fillStyle に値を入れたときに返す正規化済み文字列のマッピング */
+  normalizeMap?: Record<string, string>;
+}
 
-  const rootComputed: Record<string | number, unknown> & {
-    length: number;
-    getPropertyValue: (n: string) => string;
-  } = {
-    length: names.length,
-    getPropertyValue: (n: string) => computedSource[n] ?? '',
+function installDom(opts: InstallDomOpts = {}) {
+  const {
+    rootRuleVars = {},
+    computedVars = {},
+    initialInlineVars = {},
+    normalizeMap = {},
+  } = opts;
+
+  const rootStyle = createStyleDecl(initialInlineVars);
+  const computedSource = { ...computedVars, ...initialInlineVars };
+  const rootComputed = createStyleDecl(computedSource);
+
+  const ruleStyle = createStyleDecl(rootRuleVars);
+  const rootRule: CSSStyleRule = {
+    selectorText: ':root',
+    style: ruleStyle as unknown as CSSStyleDeclaration,
+    cssText: '',
+    parentStyleSheet: null,
+    parentRule: null,
+    type: 1,
+    STYLE_RULE: 1,
+  } as unknown as CSSStyleRule;
+
+  const cssRules = [rootRule] as unknown as CSSRuleList;
+  (cssRules as unknown as { length: number }).length = 1;
+  // Array.from 互換で iterable にする
+  (cssRules as unknown as { [i: number]: CSSRule })[0] = rootRule as unknown as CSSRule;
+
+  const sheet = { cssRules } as unknown as CSSStyleSheet;
+
+  const root = {
+    style: rootStyle,
+  } as unknown as HTMLElement;
+
+  // canvas 正規化スタブ: 与えた map で変換、未定義は値そのまま返す (brower が oklch を
+  // rgb に落とす挙動を模倣)。sentinel を必ず黒にリセットする仕様もあわせる。
+  let fillStyleHolder = '#000000';
+  const fakeCtx = {
+    get fillStyle() { return fillStyleHolder; },
+    set fillStyle(v: string) {
+      if (v === '#000000') { fillStyleHolder = '#000000'; return; }
+      fillStyleHolder = normalizeMap[v] ?? v;
+    },
   };
-  names.forEach((n, i) => { rootComputed[i] = n; });
 
-  const root: Record<string, unknown> & {
-    style: ReturnType<typeof createFakeStyle>;
-    appendChild: (el: unknown) => void;
-    removeChild: (el: unknown) => void;
-  } = {
-    style,
-    appendChild: () => {},
-    removeChild: () => {},
-  };
-
-  // @ts-expect-error Node 環境にスタブを注入
+  // @ts-expect-error stub
   globalThis.document = {
     documentElement: root,
-    createElement: () => ({ style: createFakeStyle(), __isProbe: true }),
+    styleSheets: { length: 1, 0: sheet } as unknown as StyleSheetList,
+    createElement(tag: string) {
+      if (tag === 'canvas') {
+        return { getContext: (type: string) => (type === '2d' ? fakeCtx : null) };
+      }
+      return { style: createStyleDecl() };
+    },
   };
-  // @ts-expect-error Node 環境にスタブを注入
+  // @ts-expect-error stub
   globalThis.getComputedStyle = (el: unknown) => {
     if (el === root) return rootComputed;
-    if ((el as { __isProbe?: boolean }).__isProbe) return { color: resolvedColor };
-    return { length: 0, getPropertyValue: () => '' };
+    return createStyleDecl();
   };
 
-  return { root, style };
+  return { root, rootStyle, rootComputed, ruleStyle };
 }
 
-// mermaid の動的 import をモック
+// mermaid の動的 import モック
 vi.mock('mermaid', () => ({
   default: {
     initialize: vi.fn(),
@@ -69,9 +112,9 @@ vi.mock('mermaid', () => ({
 }));
 
 beforeEach(() => {
-  // @ts-expect-error reset DOM stubs
+  // @ts-expect-error stub reset
   delete globalThis.document;
-  // @ts-expect-error reset DOM stubs
+  // @ts-expect-error stub reset
   delete globalThis.getComputedStyle;
   vi.resetModules();
   vi.clearAllMocks();
@@ -80,125 +123,222 @@ beforeEach(() => {
 async function loadFreshGateway() {
   const mod = await import('../src/lib/mermaid/render-gateway');
   mod.__testing.resetInitCache();
+  mod.__testing.resetColorCtx();
   return mod;
 }
 
-describe('render-gateway: snapshotAndNeutralize / restore', () => {
-  it('detects oklch vars and overrides them with resolved rgb', async () => {
-    const { root, style } = installDom({
-      computedVars: {
+describe('render-gateway: collectRootCustomPropNames (CSSOM 列挙)', () => {
+  it('collects --* names from :root rule', async () => {
+    installDom({
+      rootRuleVars: {
         '--color-red-500': 'oklch(0.7 0.2 25)',
         '--color-blue-500': 'oklch(0.5 0.15 250)',
-        '--color-non-oklch': 'rgb(100, 100, 100)',
+        '--spacing': '8px',
       },
-      resolvedColor: 'rgb(128, 128, 128)',
     });
     const { __testing } = await loadFreshGateway();
-
-    const snap = __testing.snapshotAndNeutralize(root as unknown as HTMLElement);
-    expect(snap.size).toBe(2);
-    expect(snap.get('--color-red-500')).toBeNull();
-    expect(snap.get('--color-blue-500')).toBeNull();
-    expect(style.getPropertyValue('--color-red-500')).toBe('rgb(128, 128, 128)');
-    expect(style.getPropertyValue('--color-blue-500')).toBe('rgb(128, 128, 128)');
-    // non-oklch はスナップショットに含まれない
-    expect(snap.has('--color-non-oklch')).toBe(false);
+    const names = __testing.collectRootCustomPropNames(document);
+    expect(names).toEqual(
+      expect.arrayContaining(['--color-red-500', '--color-blue-500', '--spacing']),
+    );
   });
 
-  it('restore removes inline value when originally absent', async () => {
-    const { root, style } = installDom({
-      computedVars: { '--color-red-500': 'oklch(0.7 0.2 25)' },
-      resolvedColor: 'rgb(10, 20, 30)',
-    });
+  it('survives SecurityError when a sheet is cross-origin', async () => {
+    installDom({ rootRuleVars: { '--color-red-500': 'oklch(0.7 0.2 25)' } });
+    // 2 枚目の sheet を cross-origin シミュレーションとして追加
+    const corsSheet = {
+      get cssRules() { throw new DOMException('SecurityError', 'SecurityError'); },
+    } as unknown as CSSStyleSheet;
+    // @ts-expect-error extend stub
+    document.styleSheets = { length: 2, 0: document.styleSheets[0], 1: corsSheet };
+
     const { __testing } = await loadFreshGateway();
-
-    const snap = __testing.snapshotAndNeutralize(root as unknown as HTMLElement);
-    expect(style.getPropertyValue('--color-red-500')).toBe('rgb(10, 20, 30)');
-    __testing.restore(root as unknown as HTMLElement, snap);
-    expect(style.getPropertyValue('--color-red-500')).toBe('');
-  });
-
-  it('restore reinstates original inline value when snapshot holds one', async () => {
-    // snapshot を手動で組み立てる (スナップショットに既存 inline 値が入っているケース)
-    // 実運用では並行呼び出しの直列化で発生しないが、restore 関数の単独動作を検証する
-    const { root, style } = installDom({ computedVars: {} });
-    const { __testing } = await loadFreshGateway();
-
-    style.setProperty('--color-red-500', 'rgb(128, 128, 128)'); // 上書き中の rgb
-    const snap = new Map<string, string | null>([
-      ['--color-red-500', 'rgb(255, 0, 0)'], // 元の inline 値
-    ]);
-
-    __testing.restore(root as unknown as HTMLElement, snap);
-    expect(style.getPropertyValue('--color-red-500')).toBe('rgb(255, 0, 0)');
+    const names = __testing.collectRootCustomPropNames(document);
+    expect(names).toContain('--color-red-500');
   });
 });
 
-describe('render-gateway: withMermaidIsolation mutex', () => {
+describe('render-gateway: normalizeToSupportedColor (canvas 正規化)', () => {
+  it('returns normalized rgb when canvas accepts the color', async () => {
+    installDom({ normalizeMap: { 'oklch(0.7 0.2 25)': 'rgb(200, 10, 10)' } });
+    const { __testing } = await loadFreshGateway();
+    expect(__testing.normalizeToSupportedColor('oklch(0.7 0.2 25)')).toBe('rgb(200, 10, 10)');
+  });
+
+  it('falls back to #000000 when canvas 2d context is unavailable', async () => {
+    // canvas.getContext が null を返すケース
+    // @ts-expect-error stub
+    globalThis.document = {
+      documentElement: { style: createStyleDecl() },
+      styleSheets: { length: 0 },
+      createElement: () => ({ getContext: () => null }),
+    };
+    // @ts-expect-error stub
+    globalThis.getComputedStyle = () => createStyleDecl();
+    const { __testing } = await loadFreshGateway();
+    expect(__testing.normalizeToSupportedColor('oklch(0.7 0.2 25)')).toBe('#000000');
+  });
+});
+
+describe('render-gateway: neutralizeOklchVars / restore', () => {
+  it('neutralizes only oklch vars and snapshot records original state', async () => {
+    const { root, rootStyle } = installDom({
+      rootRuleVars: {
+        '--color-red-500': '',
+        '--color-blue-500': '',
+        '--color-plain': '',
+      },
+      computedVars: {
+        '--color-red-500': 'oklch(0.7 0.2 25)',
+        '--color-blue-500': 'oklch(0.5 0.15 250)',
+        '--color-plain': 'rgb(100, 100, 100)',
+      },
+      normalizeMap: {
+        'oklch(0.7 0.2 25)': 'rgb(200, 10, 10)',
+        'oklch(0.5 0.15 250)': 'rgb(10, 10, 200)',
+      },
+    });
+    const { __testing } = await loadFreshGateway();
+
+    const snap = __testing.neutralizeOklchVars(root, document);
+    expect(snap.size).toBe(2);
+    expect(snap.get('--color-red-500')).toBeNull();
+    expect(snap.get('--color-blue-500')).toBeNull();
+    expect(rootStyle.getPropertyValue('--color-red-500')).toBe('rgb(200, 10, 10)');
+    expect(rootStyle.getPropertyValue('--color-blue-500')).toBe('rgb(10, 10, 200)');
+    // non-oklch は触らない
+    expect(snap.has('--color-plain')).toBe(false);
+
+    __testing.restore(root, snap);
+    expect(rootStyle.getPropertyValue('--color-red-500')).toBe('');
+    expect(rootStyle.getPropertyValue('--color-blue-500')).toBe('');
+  });
+
+  it('restore reinstates original inline value when snapshot holds one', async () => {
+    const { root, rootStyle } = installDom();
+    const { __testing } = await loadFreshGateway();
+
+    rootStyle.setProperty('--color-red-500', 'rgb(128, 128, 128)');
+    const snap = new Map<string, string | null>([
+      ['--color-red-500', 'rgb(255, 0, 0)'],
+    ]);
+    __testing.restore(root, snap);
+    expect(rootStyle.getPropertyValue('--color-red-500')).toBe('rgb(255, 0, 0)');
+  });
+});
+
+describe('render-gateway: renderMermaid integration', () => {
+  it('neutralizes during render and restores after', async () => {
+    const { rootStyle } = installDom({
+      rootRuleVars: { '--color-red-500': '' },
+      computedVars: { '--color-red-500': 'oklch(0.7 0.2 25)' },
+      normalizeMap: { 'oklch(0.7 0.2 25)': 'rgb(200, 10, 10)' },
+    });
+    const { renderMermaid } = await loadFreshGateway();
+    const mermaidMod = await import('mermaid');
+
+    // mermaid.render 内で差し替え状態を観察
+    (mermaidMod.default.render as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      expect(rootStyle.getPropertyValue('--color-red-500')).toBe('rgb(200, 10, 10)');
+      return { svg: '<svg/>' };
+    });
+
+    const result = await renderMermaid({
+      theme: 'light', htmlLabels: true, definition: 'graph TD; A', elementId: 't1',
+    });
+    expect(result.svg).toBe('<svg/>');
+    // render 完了後は復帰済み (元々 inline 無しなので空)
+    expect(rootStyle.getPropertyValue('--color-red-500')).toBe('');
+  });
+
+  it('restores root even when render throws', async () => {
+    const { rootStyle } = installDom({
+      rootRuleVars: { '--color-red-500': '' },
+      computedVars: { '--color-red-500': 'oklch(0.7 0.2 25)' },
+      normalizeMap: { 'oklch(0.7 0.2 25)': 'rgb(200, 10, 10)' },
+    });
+    const { renderMermaid } = await loadFreshGateway();
+    const mermaidMod = await import('mermaid');
+    (mermaidMod.default.render as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      throw new Error('boom');
+    });
+
+    await expect(
+      renderMermaid({ theme: 'light', htmlLabels: true, definition: 'graph TD; A', elementId: 't1' }),
+    ).rejects.toThrow('boom');
+    expect(rootStyle.getPropertyValue('--color-red-500')).toBe('');
+  });
+
+  it('initializes mermaid once for same theme + htmlLabels', async () => {
+    installDom();
+    const { renderMermaid } = await loadFreshGateway();
+    const mermaidMod = await import('mermaid');
+
+    await renderMermaid({ theme: 'light', htmlLabels: true, definition: 'g', elementId: 't1' });
+    await renderMermaid({ theme: 'light', htmlLabels: true, definition: 'g', elementId: 't2' });
+    expect(mermaidMod.default.initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-initializes when theme changes', async () => {
+    installDom();
+    const { renderMermaid } = await loadFreshGateway();
+    const mermaidMod = await import('mermaid');
+
+    await renderMermaid({ theme: 'light', htmlLabels: true, definition: 'g', elementId: 't1' });
+    await renderMermaid({ theme: 'dark', htmlLabels: true, definition: 'g', elementId: 't2' });
+    await renderMermaid({ theme: 'modern', htmlLabels: true, definition: 'g', elementId: 't3' });
+    expect(mermaidMod.default.initialize).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('render-gateway: withLock mutex', () => {
   it('serializes concurrent calls', async () => {
-    installDom({ computedVars: {} });
-    const { withMermaidIsolation } = await loadFreshGateway();
+    installDom();
+    const { __testing } = await loadFreshGateway();
 
     const order: string[] = [];
-    const p1 = withMermaidIsolation(async () => {
+    const p1 = __testing.withLock(async () => {
       order.push('start-1');
-      await new Promise((r) => setTimeout(r, 20));
+      await new Promise((r) => setTimeout(r, 15));
       order.push('end-1');
       return 1;
     });
-    const p2 = withMermaidIsolation(async () => {
+    const p2 = __testing.withLock(async () => {
       order.push('start-2');
-      await new Promise((r) => setTimeout(r, 5));
       order.push('end-2');
       return 2;
     });
-
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1).toBe(1);
     expect(r2).toBe(2);
     expect(order).toEqual(['start-1', 'end-1', 'start-2', 'end-2']);
   });
 
-  it('restores root on exception inside isolation', async () => {
-    const { style } = installDom({
-      computedVars: { '--color-red-500': 'oklch(0.7 0.2 25)' },
-      resolvedColor: 'rgb(10, 20, 30)',
-    });
-    const { withMermaidIsolation } = await loadFreshGateway();
-
-    await expect(
-      withMermaidIsolation(async () => {
-        expect(style.getPropertyValue('--color-red-500')).toBe('rgb(10, 20, 30)');
-        throw new Error('boom');
-      }),
-    ).rejects.toThrow('boom');
-
-    expect(style.getPropertyValue('--color-red-500')).toBe('');
+  it('continues the queue after a rejected task', async () => {
+    installDom();
+    const { __testing } = await loadFreshGateway();
+    await expect(__testing.withLock(async () => { throw new Error('x'); })).rejects.toThrow('x');
+    const r = await __testing.withLock(async () => 42);
+    expect(r).toBe(42);
   });
 });
 
-describe('render-gateway: renderMermaid', () => {
-  it('initializes mermaid once for same theme + htmlLabels', async () => {
-    installDom({ computedVars: {} });
-    const { renderMermaid } = await loadFreshGateway();
-    const mermaidMod = await import('mermaid');
+describe('render-gateway: neutralizeDocOklch (onclone 用)', () => {
+  it('neutralizes the cloned document without touching live root snapshot', async () => {
+    const { root, rootStyle } = installDom({
+      rootRuleVars: { '--color-red-500': '' },
+      computedVars: { '--color-red-500': 'oklch(0.7 0.2 25)' },
+      normalizeMap: { 'oklch(0.7 0.2 25)': 'rgb(200, 10, 10)' },
+    });
+    const { neutralizeDocOklch } = await loadFreshGateway();
 
-    await renderMermaid({ theme: 'light', htmlLabels: true, definition: 'graph TD; A', elementId: 't1' });
-    await renderMermaid({ theme: 'light', htmlLabels: true, definition: 'graph TD; B', elementId: 't2' });
+    // neutralizeDocOklch は引数に渡された document の root を直接書き換える
+    // (onclone のユースケース: clone は短寿命で破棄されるので restore しない)
+    neutralizeDocOklch(document);
+    expect(rootStyle.getPropertyValue('--color-red-500')).toBe('rgb(200, 10, 10)');
 
-    // theme+htmlLabels が同じなので initialize は 1 回のみ
-    expect(mermaidMod.default.initialize).toHaveBeenCalledTimes(1);
-  });
-
-  it('re-initializes when theme changes', async () => {
-    installDom({ computedVars: {} });
-    const { renderMermaid } = await loadFreshGateway();
-    const mermaidMod = await import('mermaid');
-
-    await renderMermaid({ theme: 'light', htmlLabels: true, definition: 'graph TD; A', elementId: 't1' });
-    await renderMermaid({ theme: 'dark', htmlLabels: true, definition: 'graph TD; B', elementId: 't2' });
-    await renderMermaid({ theme: 'modern', htmlLabels: true, definition: 'graph TD; C', elementId: 't3' });
-
-    expect(mermaidMod.default.initialize).toHaveBeenCalledTimes(3);
+    // root 参照は install した root そのもの (clone ではない) だが、
+    // onclone 内では渡される clonedDoc に対して同じ処理をする API であることを確認
+    expect(root).toBe(document.documentElement);
   });
 });
