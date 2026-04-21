@@ -20,8 +20,29 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024       # 5MB
 MAX_FRAME_BATCH_SIZE = 3 * 1024 * 1024  # 3MB (JSON全体)
 MAX_AUDIO_CHUNK_SIZE = 10 * 1024 * 1024  # 10MB
 
+# 許可 MIME セット — この集合は必ず normalized 値（lower-case, parameter なし）のみ格納すること
 ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png"}
 ALLOWED_AUDIO_MIMES = {"audio/webm"}
+
+
+def _normalize_mime_type(raw: Optional[str]) -> str:
+    """Content-Type ヘッダから base type を抽出（parameter剥がし + trim + lower-case）。
+
+    例: "Audio/WebM ; codecs=opus" -> "audio/webm"
+    """
+    if not raw:
+        return ""
+    return raw.split(";", 1)[0].strip().lower()
+
+
+def _reject_invalid_mime(raw: Optional[str], normalized: str, allowed: set) -> None:
+    """normalized MIME が許可集合外なら 400 を raise。構造化ログを残す。"""
+    if normalized not in allowed:
+        logger.warning(
+            "Rejected upload MIME raw=%r normalized=%r allowed=%r",
+            raw, normalized, sorted(allowed),
+        )
+        raise HTTPException(status_code=400, detail=f"Invalid MIME type: {raw}")
 
 
 def _check_participant(room_id: str, uid: str) -> None:
@@ -51,36 +72,38 @@ async def upload_file(
         if session_id:
             validate_id(session_id, "session_id")
     except ValueError as e:
+        logger.warning("upload_file rejected: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
 
     _check_participant(room_id, uid)
 
     # category バリデーション
     if category != MediaCategory.IMAGES.value:
+        logger.warning("upload_file rejected: invalid category=%r", category)
         raise HTTPException(status_code=400, detail=f"Invalid category for upload: {category}")
 
-    # MIME バリデーション
-    content_type = file.content_type or ""
-    if content_type not in ALLOWED_IMAGE_MIMES:
-        raise HTTPException(status_code=400, detail=f"Invalid MIME type: {content_type}")
+    # MIME バリデーション（parameter 剥がして比較）
+    raw_content_type = file.content_type
+    normalized_mime = _normalize_mime_type(raw_content_type)
+    _reject_invalid_mime(raw_content_type, normalized_mime, ALLOWED_IMAGE_MIMES)
 
     # ファイル読み取り + サイズチェック
     data = await file.read()
     if len(data) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=413, detail=f"File too large (max {MAX_IMAGE_SIZE // 1024 // 1024}MB)")
 
-    ext = MIME_TO_EXT.get(content_type, ".bin")
+    ext = MIME_TO_EXT.get(normalized_mime, ".bin")
     storage = get_storage()
     rel_path, filename = await storage.save_file(
         room_id, session_id, MediaCategory.IMAGES, data, ext
     )
 
-    # Firebase メタデータ
+    # Firebase メタデータ (normalized MIME を保存)
     archive_base = _archive_path(room_id, session_id)
     db.reference(f"{archive_base}/images").push({
         "filename": filename,
         "path": rel_path,
-        "mimeType": content_type,
+        "mimeType": normalized_mime,
         "sizeBytes": len(data),
         "timestamp": datetime.utcnow().isoformat() + "Z",
     })
@@ -102,6 +125,7 @@ async def upload_batch(
         if session_id:
             validate_id(session_id, "session_id")
     except ValueError as e:
+        logger.warning("upload_batch rejected: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
 
     _check_participant(room_id, uid)
@@ -109,6 +133,7 @@ async def upload_batch(
     # category バリデーション
     valid_frame_categories = {MediaCategory.FRAMES_CAMERA.value, MediaCategory.FRAMES_SCREEN.value}
     if category not in valid_frame_categories:
+        logger.warning("upload_batch rejected: invalid category=%r", category)
         raise HTTPException(status_code=400, detail=f"Invalid category for batch: {category}")
 
     # JSON サイズチェック
@@ -173,36 +198,44 @@ async def upload_audio(
         if session_id:
             validate_id(session_id, "session_id")
     except ValueError as e:
+        logger.warning("upload_audio rejected: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
 
     _check_participant(room_id, uid)
 
     # source バリデーション
     if source not in ("mic", "tab"):
+        logger.warning("upload_audio rejected: invalid source=%r", source)
         raise HTTPException(status_code=400, detail=f"Invalid source: {source}")
 
-    # MIME バリデーション
-    content_type = file.content_type or ""
-    if content_type not in ALLOWED_AUDIO_MIMES:
-        raise HTTPException(status_code=400, detail=f"Invalid MIME type: {content_type}")
+    # chunk_index バリデーション (負数は 400。非整数は FastAPI の Form(...) pydantic 検証で 422)
+    if chunk_index < 0:
+        logger.warning("upload_audio rejected: invalid chunk_index=%r", chunk_index)
+        raise HTTPException(status_code=400, detail=f"Invalid chunk_index: {chunk_index}")
+
+    # MIME バリデーション（parameter 剥がして比較。例: "audio/webm;codecs=opus" → "audio/webm"）
+    raw_content_type = file.content_type
+    normalized_mime = _normalize_mime_type(raw_content_type)
+    _reject_invalid_mime(raw_content_type, normalized_mime, ALLOWED_AUDIO_MIMES)
 
     # ファイル読み取り + サイズチェック
     data = await file.read()
     if len(data) > MAX_AUDIO_CHUNK_SIZE:
         raise HTTPException(status_code=413, detail=f"File too large (max {MAX_AUDIO_CHUNK_SIZE // 1024 // 1024}MB)")
 
+    ext = MIME_TO_EXT.get(normalized_mime, ".bin")
     storage = get_storage()
     rel_path, filename = await storage.save_file(
-        room_id, session_id, MediaCategory.AUDIO, data, ".webm",
+        room_id, session_id, MediaCategory.AUDIO, data, ext,
         prefix=f"{source}_{chunk_index}_",
     )
 
-    # Firebase メタデータ
+    # Firebase メタデータ (normalized MIME を保存)
     archive_base = _archive_path(room_id, session_id)
     db.reference(f"{archive_base}/audio").push({
         "filename": filename,
         "path": rel_path,
-        "mimeType": content_type,
+        "mimeType": normalized_mime,
         "sizeBytes": len(data),
         "source": source,
         "chunkIndex": chunk_index,
