@@ -16,8 +16,8 @@ class FirebaseAPIKeyManager:
 
         if not self.encryption_key:
             logger.warning(
-                "ENCRYPTION_KEY is not set. Per-room API key feature is disabled. "
-                "LLM calls will fall back to DEFAULT_GEMINI_API_KEY.")
+                "ENCRYPTION_KEY is not set. Per-room API keys are disabled; "
+                "provider defaults will be used where available.")
             return
 
         try:
@@ -35,7 +35,9 @@ class FirebaseAPIKeyManager:
     ) -> bool:
         """プロバイダー別にAPIキーを暗号化保存"""
         if not self.cipher:
-            logger.debug("Encryption cipher not initialized. Cannot store API key.")
+            logger.warning(
+                f"Cannot store API key for room {room_id}, provider {provider}: "
+                "encryption cipher not initialized (ENCRYPTION_KEY missing or invalid).")
             return False
 
         try:
@@ -126,7 +128,9 @@ class FirebaseAPIKeyManager:
     def store_room_api_key(self, room_id: str, api_key: str, owner_uid: str, ttl_hours: int = 24) -> bool:
         """部屋作成時にAPIキーを暗号化保存 (旧API - 後方互換)"""
         if not self.cipher:
-            logger.debug("Encryption cipher not initialized. Cannot store API key.")
+            logger.warning(
+                f"Cannot store legacy API key for room {room_id}: "
+                "encryption cipher not initialized (ENCRYPTION_KEY missing or invalid).")
             return False
 
         logger.info(f"Attempting to store API key for room {room_id}.")
