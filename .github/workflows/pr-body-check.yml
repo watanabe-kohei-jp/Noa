@@ -1,0 +1,39 @@
+name: PR Body Check
+
+# PR body に closing keyword (Fixes/Closes/Resolves #<num>) が含まれていることを必須化する。
+# 含まれていない場合は workflow が fail し、branch protection で merge を阻止する。
+#
+# Issue 紐付けが本当に不要な場合 (テンプレ追加など) は、body に `No-Issue: <理由>` を含めるとバイパス可能。
+#
+# 背景: PR #113 が Fixes #95 を含まずに merge され、Issue #95 が自動クローズされなかった事故への再発防止。
+# 詳細: Issue #120
+
+on:
+  pull_request:
+    types: [opened, edited, reopened]
+
+jobs:
+  check-closing-keyword:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require closing keyword or No-Issue bypass
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$PR_BODY" ]; then
+            echo "::error::PR body is empty. Include 'Fixes #<num>' or 'No-Issue: <reason>'."
+            exit 1
+          fi
+          if echo "$PR_BODY" | grep -qiE '(Fix(es|ed)?|Close[sd]?|Resolve[sd]?)[[:space:]]+#[0-9]+'; then
+            echo "OK: closing keyword found."
+            exit 0
+          fi
+          if echo "$PR_BODY" | grep -qE 'No-Issue:[[:space:]]*[^[:space:]]'; then
+            echo "OK: No-Issue bypass present."
+            exit 0
+          fi
+          echo "::error::PR body must include 'Fixes/Closes/Resolves #<num>' or 'No-Issue: <reason>'."
+          echo "----- PR body received -----"
+          echo "$PR_BODY"
+          echo "----------------------------"
+          exit 1
