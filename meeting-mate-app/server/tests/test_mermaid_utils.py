@@ -7,7 +7,12 @@ SERVER_DIR = os.path.dirname(os.path.dirname(__file__))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
-from mermaid_utils import validate_and_clean_mermaid  # noqa: E402
+from mermaid_utils import (  # noqa: E402
+    validate_and_clean_mermaid,
+    _scan_top_level_arrows,
+    _count_arrows_in_line,
+    _split_line_by_arrows,
+)
 
 
 class ValidateAndCleanMermaidTests(unittest.TestCase):
@@ -260,6 +265,167 @@ class ValidateAndCleanMermaidTests(unittest.TestCase):
         cleaned = validate_and_clean_mermaid(raw)
         self.assertIsNotNone(cleaned)
         self.assertTrue(cleaned.startswith("graph RL"))
+
+
+class TopLevelArrowScannerTests(unittest.TestCase):
+    # === #112: top-level arrow scanner 直接テスト ===
+
+    def test_count_simple_chain(self):
+        self.assertEqual(_count_arrows_in_line("A --> B -.-> C"), 2)
+
+    def test_count_three_mixed_arrows(self):
+        self.assertEqual(_count_arrows_in_line("A -.-> B ==> C --> D"), 3)
+
+    def test_count_ignores_arrow_inside_bracket(self):
+        self.assertEqual(_count_arrows_in_line('A["x --> y: z"] --> B'), 1)
+
+    def test_count_ignores_arrow_inside_pipe_label(self):
+        self.assertEqual(_count_arrows_in_line('A -->|"label --> inner"| B'), 1)
+
+    def test_count_no_arrows_in_subgraph_line(self):
+        self.assertEqual(_count_arrows_in_line("subgraph cluster"), 0)
+
+    def test_split_into_three_segments(self):
+        self.assertEqual(_split_line_by_arrows("A --> B -.-> C"), ["A ", " B ", " C"])
+
+    def test_split_empty_when_no_arrows(self):
+        self.assertEqual(_split_line_by_arrows("A"), [])
+
+    def test_odd_backslash_keeps_quote_open(self):
+        """奇数本 `\\` 直後の `"` は escape 扱いで quote トグルしない。"""
+        self.assertEqual(_count_arrows_in_line(r'A["x \" --> y"] --> B'), 1)
+
+    def test_count_arrow_after_pipe_label(self):
+        self.assertEqual(_count_arrows_in_line('A -->|x: y| B -.-> C'), 2)
+
+    def test_unclosed_pipe_is_unsafe_terminal(self):
+        scan = _scan_top_level_arrows('A -->|unclosed B --> C')
+        self.assertTrue(scan.unsafe_terminal)
+
+    def test_pipe_label_with_mixed_brackets(self):
+        """pipe 中は bracket depth を更新しないため、pipe 外の矢印は正しくカウントされる。"""
+        self.assertEqual(
+            _count_arrows_in_line('A -->|"x [y] (z) {w}: q"| B -.-> C'),
+            2,
+        )
+
+    def test_even_backslash_closes_quote(self):
+        """偶数本 `\\` 直後の `"` は閉じ引用符として quote トグルする。"""
+        self.assertEqual(_count_arrows_in_line(r'A["x\\"] --> B'), 1)
+
+    def test_empty_pipe_label_counts_both_arrows(self):
+        self.assertEqual(_count_arrows_in_line('A -->|| B -.-> C'), 2)
+
+    def test_unclosed_quote_is_unsafe_terminal(self):
+        scan = _scan_top_level_arrows('A --> B : "unclosed')
+        self.assertTrue(scan.unsafe_terminal)
+
+    def test_unclosed_bracket_is_unsafe_terminal(self):
+        scan = _scan_top_level_arrows('A --> B["x : y')
+        self.assertTrue(scan.unsafe_terminal)
+
+
+class ResidualColonOnChainedEdgeTests(unittest.TestCase):
+    # === #112: チェーン記法 + コロン残留の振る舞いテスト ===
+
+    def _body(self, body: str) -> str:
+        return f"graph TD\n    {body}"
+
+    def test_issue112_reproduction_colon_before_arrow(self):
+        raw = self._body("TASK_DESIGN_DRAFT: 担当 PERSON_TANAKA -.-> TASK_REVIEW")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_colon_between_arrows(self):
+        raw = self._body("A --> B: ラベル C -.-> D")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_colon_only_before_arrow(self):
+        raw = self._body("A: label --> B")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_japanese_label_in_chain(self):
+        raw = self._body("開始 --> 中間: 処理中 -.-> 終了")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_colon_in_trailing_segment(self):
+        raw = self._body("A --> B --> C: トレイリング")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_multiple_colons_in_chain(self):
+        raw = self._body("A --> B: x --> C: y --> D")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_accepts_bracket_colon_in_chain(self):
+        raw = self._body('A --> B["項目: 説明"] -.-> C')
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_accepts_quoted_colon_in_last_node(self):
+        raw = self._body('A --> B -.-> C["key:value"]')
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_accepts_pipe_label_with_colon_inside(self):
+        raw = self._body('A -->|"比率 70:30"| B')
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_accepts_pure_chain_without_colon(self):
+        raw = self._body("A --> B -.-> C ==> D")
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_accepts_arrow_inside_bracket_label(self):
+        """ブラケット内の偽矢印を誤ってチェーン判定しない。"""
+        raw = self._body('A["x --> y: z"] --> B')
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_fixes_colon_label_with_bracket_arrow_in_target(self):
+        """ブラケット内に矢印 + 矢印後コロンラベルが正しくパイプ形式に修正される。"""
+        raw = self._body('A --> B["x -.-> y: z"] : "label"')
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"label"|', cleaned)
+
+    def test_accepts_unquoted_colon_in_pipe_label(self):
+        raw = self._body('A -->|70:30| B')
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_accepts_pipe_label_followed_by_chain(self):
+        raw = self._body('A -->|"x: y"| B -.-> C')
+        self.assertIsNotNone(validate_and_clean_mermaid(raw))
+
+    def test_fixes_colon_label_with_escaped_quote_in_bracket(self):
+        raw = self._body(r'A["x \" --> y: z"] --> B : "label"')
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"label"|', cleaned)
+
+    def test_rejects_unclosed_pipe(self):
+        raw = self._body("A -->|unclosed B --> C")
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_fixes_colon_label_with_mixed_brackets_in_pipe(self):
+        raw = self._body('A -->|"x [y] (z) {w}: q"| B : "label"')
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"label"|', cleaned)
+
+    def test_fixes_colon_label_with_pipe_inside_bracket(self):
+        """ブラケット内の `|` は pipe delimiter ではない (in_pipe トグルしない)。"""
+        raw = self._body('A --> B["x | y"] : "label"')
+        cleaned = validate_and_clean_mermaid(raw)
+        self.assertIsNotNone(cleaned)
+        self.assertIn('-->|"label"|', cleaned)
+
+    def test_rejects_label_containing_pipe(self):
+        """ラベル文字列に `|` がある場合は no-fix → 残留コロンで reject。"""
+        raw = self._body('A --> B : "x | y"')
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_unclosed_quote(self):
+        raw = self._body('A --> B : "unclosed')
+        self.assertIsNone(validate_and_clean_mermaid(raw))
+
+    def test_rejects_unclosed_bracket(self):
+        raw = self._body('A --> B["x : y')
+        self.assertIsNone(validate_and_clean_mermaid(raw))
 
 
 if __name__ == "__main__":
