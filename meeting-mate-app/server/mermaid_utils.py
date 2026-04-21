@@ -5,6 +5,7 @@ Brain の generate_diagram と overview_diagram_agent で共通利用する。
 """
 import re
 import logging
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -60,87 +61,190 @@ _NON_EDGE_PREFIXES = (
 )
 
 
+def _is_escaped_at(text: str, i: int) -> bool:
+    """位置 i の文字が直前の連続するバックスラッシュで escape されているかを奇偶判定で返す。"""
+    count = 0
+    j = i - 1
+    while j >= 0 and text[j] == '\\':
+        count += 1
+        j -= 1
+    return count % 2 == 1
+
+
 def _find_colon_outside_brackets(text: str) -> int:
-    """括弧 ([], (), {}) とクォート ("") の外にある最初の `:` の位置を返す。見つからなければ -1。"""
+    """ブラケット `[](){}` / クォート `""` / パイプラベル `|...|` の外にある最初の `:` の位置を返す。
+    見つからなければ -1。
+    """
     depth_square = 0
     depth_paren = 0
     depth_curly = 0
     in_quotes = False
+    in_pipe = False
     for i, ch in enumerate(text):
-        if ch == '"' and (i == 0 or text[i - 1] != '\\'):
+        # 1. quote toggle (escape 奇偶を判定)
+        if ch == '"' and not _is_escaped_at(text, i):
             in_quotes = not in_quotes
             continue
         if in_quotes:
             continue
-        if ch == '[':
-            depth_square += 1
-        elif ch == ']':
-            depth_square = max(0, depth_square - 1)
-        elif ch == '(':
-            depth_paren += 1
-        elif ch == ')':
-            depth_paren = max(0, depth_paren - 1)
-        elif ch == '{':
-            depth_curly += 1
-        elif ch == '}':
-            depth_curly = max(0, depth_curly - 1)
-        elif ch == ':' and depth_square == 0 and depth_paren == 0 and depth_curly == 0:
+        # 2. pipe 中は bracket depth を更新しない
+        if not in_pipe:
+            if ch == '[':
+                depth_square += 1
+                continue
+            if ch == ']':
+                depth_square = max(0, depth_square - 1)
+                continue
+            if ch == '(':
+                depth_paren += 1
+                continue
+            if ch == ')':
+                depth_paren = max(0, depth_paren - 1)
+                continue
+            if ch == '{':
+                depth_curly += 1
+                continue
+            if ch == '}':
+                depth_curly = max(0, depth_curly - 1)
+                continue
+        # 3. top-level で pipe toggle
+        if depth_square == 0 and depth_paren == 0 and depth_curly == 0 and ch == '|':
+            in_pipe = not in_pipe
+            continue
+        if in_pipe:
+            continue
+        # 4. top-level での colon 検出
+        if ch == ':' and depth_square == 0 and depth_paren == 0 and depth_curly == 0:
             return i
     return -1
 
 
+class ScanResult(NamedTuple):
+    arrows: list[tuple[int, str]]
+    unsafe_terminal: bool
+
+
+def _scan_top_level_arrows(line: str) -> ScanResult:
+    """行内の top-level (ブラケット/クォート/パイプラベル外) の矢印トークンをスキャン。
+
+    Returns:
+        ScanResult(arrows=[(位置, トークン), ...], unsafe_terminal=bool)
+        unsafe_terminal は行末時点で in_pipe / in_quotes / 残ブラケット深度>0
+        のいずれかなら True (未閉鎖構文 → バリデータで reject する)。
+    """
+    arrows: list[tuple[int, str]] = []
+    depth_square = 0
+    depth_paren = 0
+    depth_curly = 0
+    in_quotes = False
+    in_pipe = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        # 1. quote toggle (escape 奇偶を判定)
+        if ch == '"' and not _is_escaped_at(line, i):
+            in_quotes = not in_quotes
+            i += 1
+            continue
+        if in_quotes:
+            i += 1
+            continue
+        # 2. pipe 中は bracket depth を更新しない
+        if not in_pipe:
+            if ch == '[':
+                depth_square += 1
+                i += 1
+                continue
+            if ch == ']':
+                depth_square = max(0, depth_square - 1)
+                i += 1
+                continue
+            if ch == '(':
+                depth_paren += 1
+                i += 1
+                continue
+            if ch == ')':
+                depth_paren = max(0, depth_paren - 1)
+                i += 1
+                continue
+            if ch == '{':
+                depth_curly += 1
+                i += 1
+                continue
+            if ch == '}':
+                depth_curly = max(0, depth_curly - 1)
+                i += 1
+                continue
+        # 3. top-level で pipe toggle
+        if depth_square == 0 and depth_paren == 0 and depth_curly == 0 and ch == '|':
+            in_pipe = not in_pipe
+            i += 1
+            continue
+        if in_pipe:
+            i += 1
+            continue
+        # 4. top-level で矢印トークン前方一致 (長い順)
+        if depth_square == 0 and depth_paren == 0 and depth_curly == 0:
+            matched = False
+            for token in _ARROW_TOKENS:
+                if line.startswith(token, i):
+                    arrows.append((i, token))
+                    i += len(token)
+                    matched = True
+                    break
+            if matched:
+                continue
+        i += 1
+
+    unsafe_terminal = (
+        in_pipe or in_quotes
+        or depth_square > 0 or depth_paren > 0 or depth_curly > 0
+    )
+    return ScanResult(arrows=arrows, unsafe_terminal=unsafe_terminal)
+
+
 def _count_arrows_in_line(line: str) -> int:
-    """行内の矢印トークン数を返す（チェーン記法の検出用）。"""
-    count = 0
-    remaining = line
-    while remaining:
-        found = False
-        for token in _ARROW_TOKENS:
-            idx = remaining.find(token)
-            if idx != -1:
-                count += 1
-                remaining = remaining[idx + len(token):]
-                found = True
-                break
-        if not found:
-            break
-    return count
+    """行内の top-level 矢印トークン数を返す (チェーン記法判定用)。"""
+    return len(_scan_top_level_arrows(line).arrows)
+
+
+def _split_line_by_arrows(line: str) -> list[str]:
+    """行を top-level 矢印トークンで分割。矢印 N 本なら N+1 セグメント、0 本なら []。"""
+    arrows = _scan_top_level_arrows(line).arrows
+    if not arrows:
+        return []
+    segments: list[str] = []
+    prev = 0
+    for pos, token in arrows:
+        segments.append(line[prev:pos])
+        prev = pos + len(token)
+    segments.append(line[prev:])
+    return segments
 
 
 def _fix_flowchart_colon_labels(line: str) -> str:
     """フローチャートの `A --> B : "label"` を `A -->|"label"| B` に修正する。
 
-    修正不能な場合は元の行をそのまま返す（残留コロン検証で検出）。
+    以下のいずれかに該当する場合は元の行をそのまま返す (残留コロン検証側で検出):
+    - 非エッジ行 / dash-label 既完成 / チェーン記法 / 終端状態不正 / 矢印なし
+    - 抽出ラベルに `|` が含まれる (delimiter 衝突回避)
     """
     stripped = line.strip()
 
-    # 非エッジ行をスキップ
     if not stripped or stripped.startswith(_NON_EDGE_PREFIXES):
         return line
 
-    # 既に正しい dash-label 形式 (A -- "label" --> B) はスキップ
     if re.search(r'--\s*"[^"]*"\s*-->', stripped):
         return line
 
-    # チェーン記法（矢印2つ以上）の場合は修正不能 → そのまま返す
-    if _count_arrows_in_line(stripped) >= 2:
+    scan = _scan_top_level_arrows(stripped)
+    if scan.unsafe_terminal or not scan.arrows or len(scan.arrows) >= 2:
         return line
 
-    # 矢印トークンを検索
-    arrow_idx = -1
-    arrow_token = None
-    for token in _ARROW_TOKENS:
-        idx = stripped.find(token)
-        if idx != -1:
-            arrow_idx = idx
-            arrow_token = token
-            break
-    if arrow_idx == -1:
-        return line
-
+    arrow_idx, arrow_token = scan.arrows[0]
     after_arrow = stripped[arrow_idx + len(arrow_token):]
 
-    # 矢印後の部分から括弧外の `:` を探す
     colon_pos = _find_colon_outside_brackets(after_arrow)
     if colon_pos == -1:
         return line
@@ -151,7 +255,9 @@ def _fix_flowchart_colon_labels(line: str) -> str:
     if not target or not label_raw:
         return line
 
-    # ラベルをクォート
+    if '|' in label_raw:
+        return line
+
     if not label_raw.startswith('"'):
         label_raw = f'"{label_raw}"'
 
@@ -162,24 +268,20 @@ def _fix_flowchart_colon_labels(line: str) -> str:
 
 
 def _has_residual_colon_on_edge(line: str) -> bool:
-    """フローチャートエッジ行に括弧外の `:` が残っているかチェック。"""
+    """フローチャートエッジ行に top-level の `:` が残っている、または終端状態不正かチェック。"""
     stripped = line.strip()
     if not stripped or stripped.startswith(_NON_EDGE_PREFIXES):
         return False
 
-    # 矢印がない行はエッジではない
-    has_arrow = False
-    for token in _ARROW_TOKENS:
-        if token in stripped:
-            has_arrow = True
-            # 矢印後の部分のみチェック
-            after = stripped[stripped.find(token) + len(token):]
-            # 既にパイプラベル形式なら OK
-            if re.search(r'\|[^|]*\|', after):
-                return False
-            if _find_colon_outside_brackets(after) != -1:
-                return True
-            break
+    scan = _scan_top_level_arrows(stripped)
+    if scan.unsafe_terminal:
+        return True
+    if not scan.arrows:
+        return False
+
+    for seg in _split_line_by_arrows(stripped):
+        if _find_colon_outside_brackets(seg) != -1:
+            return True
 
     return False
 
