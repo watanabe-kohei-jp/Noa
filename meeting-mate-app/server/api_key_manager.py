@@ -12,15 +12,19 @@ class FirebaseAPIKeyManager:
     def __init__(self):
         self.db = firebase_admin.db
         self.encryption_key = os.environ.get('ENCRYPTION_KEY')
+        self.cipher: Optional[Fernet] = None
+
         if not self.encryption_key:
-            logger.error(
-                "ENCRYPTION_KEY environment variable is not set. API key encryption/decryption will fail.")
+            logger.warning(
+                "ENCRYPTION_KEY is not set. Per-room API keys are disabled; "
+                "provider defaults will be used where available.")
+            return
+
         try:
             self.cipher = Fernet(self.encryption_key.encode())
         except Exception as e:
             logger.error(
                 f"Failed to initialize Fernet cipher with provided ENCRYPTION_KEY: {e}")
-            self.cipher = None
 
     # ================================================================
     # マルチプロバイダー APIキー管理
@@ -31,7 +35,9 @@ class FirebaseAPIKeyManager:
     ) -> bool:
         """プロバイダー別にAPIキーを暗号化保存"""
         if not self.cipher:
-            logger.error("Encryption cipher not initialized. Cannot store API key.")
+            logger.warning(
+                f"Cannot store API key for room {room_id}, provider {provider}: "
+                "encryption cipher not initialized (ENCRYPTION_KEY missing or invalid).")
             return False
 
         try:
@@ -52,7 +58,7 @@ class FirebaseAPIKeyManager:
     def get_provider_api_key(self, room_id: str, provider: str) -> Optional[str]:
         """プロバイダー別にAPIキーを復号化取得"""
         if not self.cipher:
-            logger.error("Encryption cipher not initialized. Cannot retrieve API key.")
+            logger.debug("Encryption cipher not initialized. Cannot retrieve API key.")
             return None
 
         # 新形式: api_keys/{provider}
@@ -122,7 +128,9 @@ class FirebaseAPIKeyManager:
     def store_room_api_key(self, room_id: str, api_key: str, owner_uid: str, ttl_hours: int = 24) -> bool:
         """部屋作成時にAPIキーを暗号化保存 (旧API - 後方互換)"""
         if not self.cipher:
-            logger.error("Encryption cipher not initialized. Cannot store API key.")
+            logger.warning(
+                f"Cannot store legacy API key for room {room_id}: "
+                "encryption cipher not initialized (ENCRYPTION_KEY missing or invalid).")
             return False
 
         logger.info(f"Attempting to store API key for room {room_id}.")
