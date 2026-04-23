@@ -98,6 +98,31 @@ ALLOWED_ORIGINS = os.environ.get(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def log_request_metrics(request, call_next):
+    """全リクエストの所要時間とレスポンスサイズを構造化ログ出力する。
+
+    Issue #124: /invoke の Next.js dev proxy で ECONNRESET が発生する原因
+    （レスポンス肥大 / 処理時間 / keep-alive 不整合）を切り分けるための計測。
+    Content-Length は streaming 時に欠落することがあるため "?" でフォールバック。
+    """
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    size_str = response.headers.get("content-length", "?")
+    logger.info(
+        "[metrics] method=%s path=%s status=%d size=%s elapsed_ms=%.1f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        size_str,
+        elapsed_ms,
+    )
+    return response
+
+
 app.include_router(media_router)
 
 agenda_agent = AgendaManagementAgent(config_path=os.path.join(
