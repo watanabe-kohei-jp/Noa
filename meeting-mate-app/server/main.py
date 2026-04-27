@@ -24,7 +24,8 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
+from uuid import uuid4
 from dotenv import load_dotenv
 import logging
 import time
@@ -45,6 +46,145 @@ def _get_processing_lock(session_data_path: str) -> asyncio.Lock:
     if session_data_path not in _llm_processing_locks:
         _llm_processing_locks[session_data_path] = asyncio.Lock()
     return _llm_processing_locks[session_data_path]
+
+
+def iso_now() -> str:
+    """ISO8601 形式の現在時刻 (UTC、Z 付き) を返す。プロジェクト全体で統一フォーマット。"""
+    return datetime.utcnow().isoformat() + "Z"
+
+
+# Issue #129: AI トリガーすべき transcript エントリの判定 (ループ防止)
+_TRIGGERABLE_ORIGINS = {"human_chat", "human_stt"}
+
+
+def _is_triggerable_transcript_entry(entry: dict) -> bool:
+    """transcript エントリが LLM トリガー対象かを判定する。
+
+    origin allowlist でフィルタ。後方互換として origin 未設定のエントリは
+    role/source から推定する。
+    """
+    origin = entry.get("origin")
+    if origin:
+        return origin in _TRIGGERABLE_ORIGINS
+    if entry.get("role") == "ai":
+        return False
+    source = entry.get("source")
+    if source in ("stt", "manual"):
+        return True
+    if source == "live-api" and entry.get("role") == "user":
+        return True
+    return entry.get("role") != "ai"
+
+
+def _count_triggerable_messages(db_transcript_entries: List[Dict[str, Any]]) -> int:
+    """transcript からトリガー対象メッセージ数を集計する"""
+    return sum(1 for e in db_transcript_entries if _is_triggerable_transcript_entry(e))
+
+
+# Issue #129: job レコードのライフサイクル管理
+JOBS_PURGE_DEFAULT_AGE_SECONDS = 1800  # 30 分。タブ復帰や遅延完了の観測時間として妥当
+
+
+def _parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """ISO 文字列を datetime に変換。失敗時は None を返す。"""
+    if not value:
+        return None
+    try:
+        # iso_now() で書いた値は末尾 "Z" 付き。fromisoformat は Z を扱えないため除去。
+        cleaned = value.rstrip("Z")
+        return datetime.fromisoformat(cleaned)
+    except (ValueError, TypeError):
+        return None
+
+
+def _purge_old_jobs(room_id: str, max_age_seconds: int = JOBS_PURGE_DEFAULT_AGE_SECONDS) -> int:
+    """terminal status (done / error) の古い job を削除する。
+
+    running / queued は決して削除しない (実進行中の可能性があるため)。
+    クラッシュで stale になった running / queued は startup の _recover_stale_jobs で復旧する。
+
+    Returns: 削除した job 数
+    """
+    try:
+        jobs = db.reference(f"rooms/{room_id}/jobs").get() or {}
+    except Exception as e:
+        logger.warning(f"[_purge_old_jobs] Failed to read jobs for room {room_id}: {e}")
+        return 0
+
+    if not isinstance(jobs, dict):
+        return 0
+
+    threshold = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+    deleted = 0
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") not in ("done", "error"):
+            continue
+        completed_at = _parse_iso_timestamp(job.get("completedAt"))
+        if completed_at is None or completed_at >= threshold:
+            continue
+        try:
+            db.reference(f"rooms/{room_id}/jobs/{job_id}").delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"[_purge_old_jobs] Failed to delete job {job_id}: {e}")
+    if deleted:
+        logger.info(f"[_purge_old_jobs] room={room_id} deleted={deleted}")
+    return deleted
+
+
+def _purge_room_jobs(room_id: str) -> None:
+    """room 配下の全 job を削除する (/end_session などセッション終端で使う)"""
+    try:
+        db.reference(f"rooms/{room_id}/jobs").delete()
+        logger.info(f"[_purge_room_jobs] room={room_id} jobs deleted")
+    except Exception as e:
+        logger.warning(f"[_purge_room_jobs] Failed for room {room_id}: {e}")
+
+
+def _recover_stale_jobs() -> int:
+    """startup 時に running / queued な job を error に格上げする。
+
+    FastAPI BackgroundTasks は durable queue ではないため、プロセス終了/deploy/crash で
+    job 実行が中断されるが RTDB には running/queued が残る。フロントが永久ロード状態に
+    陥らないよう、起動時に格上げする。
+
+    Returns: 格上げした job 数
+    """
+    try:
+        rooms = db.reference("rooms").get() or {}
+    except Exception as e:
+        logger.warning(f"[_recover_stale_jobs] Failed to read rooms: {e}")
+        return 0
+
+    if not isinstance(rooms, dict):
+        return 0
+
+    recovered = 0
+    for room_id, room_data in rooms.items():
+        if not isinstance(room_data, dict):
+            continue
+        jobs = room_data.get("jobs", {}) or {}
+        if not isinstance(jobs, dict):
+            continue
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            if job.get("status") not in ("queued", "running"):
+                continue
+            try:
+                db.reference(f"rooms/{room_id}/jobs/{job_id}").update({
+                    "status": "error",
+                    "error": {"code": -32001, "message": "stale_after_restart"},
+                    "completedAt": iso_now(),
+                })
+                recovered += 1
+            except Exception as e:
+                logger.warning(f"[_recover_stale_jobs] Failed to update {room_id}/{job_id}: {e}")
+    if recovered:
+        logger.info(f"[_recover_stale_jobs] recovered={recovered} jobs")
+    return recovered
 
 load_dotenv()
 
@@ -229,9 +369,37 @@ class AgentResult(BaseModel):
 
 class JsonRpcResponse(BaseModel):
     jsonrpc: str = "2.0"
-    result: Optional[AgentResult] = None
+    # Issue #129: /invoke が 202 を返す場合は JobAcceptedResult、デモルーム同期パスは AgentResult。
+    # Pydantic v2 は Any でも model 入れ子のシリアライズは透過に処理する。
+    result: Optional[Any] = None
     error: Optional[Dict[str, Any]] = None
     id: str
+
+
+class JobAcceptedResult(BaseModel):
+    """Issue #129: /invoke 202 レスポンスの result"""
+    jobId: str
+    status: Literal["queued"] = "queued"
+
+
+class JobAgentStatus(BaseModel):
+    status: Literal["pending", "running", "done", "error"] = "pending"
+    error: Optional[str] = None
+
+
+class JobRecord(BaseModel):
+    """Issue #129: rooms/{roomId}/jobs/{jobId} に書き込むコントロールプレーンレコード"""
+    jobId: str
+    sessionId: Optional[str] = None
+    speakerId: Optional[str] = None
+    requestId: Optional[str] = None
+    status: Literal["queued", "running", "done", "error"]
+    createdAt: str
+    startedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+    invokedAgents: List[str] = []
+    agents: Dict[str, JobAgentStatus] = {}
+    error: Optional[Dict[str, Any]] = None
 
 
 class JoinRoomRequest(BaseModel):
