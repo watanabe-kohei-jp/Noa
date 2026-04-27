@@ -135,12 +135,38 @@ def _purge_old_jobs(room_id: str, max_age_seconds: int = JOBS_PURGE_DEFAULT_AGE_
 
 
 def _purge_room_jobs(room_id: str) -> None:
-    """room 配下の全 job を削除する (/end_session などセッション終端で使う)"""
+    """room 配下の全 job を削除する (room 自体の削除など全消し用)"""
     try:
         db.reference(f"rooms/{room_id}/jobs").delete()
         logger.info(f"[_purge_room_jobs] room={room_id} jobs deleted")
     except Exception as e:
         logger.warning(f"[_purge_room_jobs] Failed for room {room_id}: {e}")
+
+
+def _purge_session_jobs(room_id: str, session_id: str) -> int:
+    """指定セッションに紐づく job のみを削除する (セッション削除時に使用)"""
+    try:
+        jobs = db.reference(f"rooms/{room_id}/jobs").get() or {}
+    except Exception as e:
+        logger.warning(f"[_purge_session_jobs] read failed for room {room_id}: {e}")
+        return 0
+    if not isinstance(jobs, dict):
+        return 0
+    deleted = 0
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        if job.get("sessionId") != session_id:
+            continue
+        try:
+            db.reference(f"rooms/{room_id}/jobs/{job_id}").delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"[_purge_session_jobs] delete failed for {job_id}: {e}")
+    if deleted:
+        logger.info(
+            f"[_purge_session_jobs] room={room_id} session={session_id} deleted={deleted}")
+    return deleted
 
 
 def _recover_stale_jobs() -> int:
@@ -238,6 +264,20 @@ ALLOWED_ORIGINS = os.environ.get(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.on_event("startup")
+async def _on_startup_recover_jobs():
+    """Issue #129: プロセス起動時に running/queued な job を error に格上げする。
+
+    BackgroundTasks は durable queue ではないため、deploy/crash で job 実行が中断されると
+    RTDB に running/queued が残りフロントが永久ロード状態になる。これを防ぐ復旧フック。
+    """
+    try:
+        recovered = _recover_stale_jobs()
+        logger.info(f"[startup] stale job recovery: {recovered} job(s) marked error")
+    except Exception as e:
+        logger.warning(f"[startup] stale job recovery failed: {e}")
 
 
 @app.middleware("http")
@@ -761,6 +801,12 @@ async def delete_session_endpoint(room_id: str, session_id: str):
     if current_id == session_id:
         current_ref.set(None)
 
+    # Issue #129: 削除セッションに紐づく invoke job を purge (孤児防止)
+    try:
+        _purge_session_jobs(room_id, session_id)
+    except Exception as e:
+        logger.warning(f"Failed to purge session jobs for {session_id}: {e}")
+
     return {"status": "deleted", "message": "セッションを削除しました"}
 
 
@@ -931,7 +977,22 @@ async def process_single_agent(
         results_dict[agent_name] = {"error": str(e)}
 
 
-async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None, session_data: Optional[Dict[str, Any]] = None, room_data: Optional[Dict[str, Any]] = None):
+async def orchestrate_agents(
+    task_payload: TaskPayload,
+    background_tasks: BackgroundTasks,
+    db_transcript_entries: List[Dict[str, Any]],
+    llm_api_key: Optional[str] = None,
+    session_data: Optional[Dict[str, Any]] = None,
+    room_data: Optional[Dict[str, Any]] = None,
+    job_id: Optional[str] = None,
+    room_id_for_job: Optional[str] = None,
+):
+    """エージェント群の振り分けと並列実行を行う。
+
+    Issue #129: job_id + room_id_for_job が指定された場合、各エージェントの実行前後に
+    rooms/{room_id_for_job}/jobs/{job_id}/agents/{agentName}.status を更新する。
+    この引数が None の場合は従来挙動 (vision pipeline 等の後方互換)。
+    """
     logger.info(
         f"Orchestrating agents for task: {task_payload.taskId}, room: {task_payload.roomId}")
 
@@ -1096,6 +1157,34 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
     active_agent_names = []
     agent_instructions_map = {}
 
+    # Issue #129: per-agent 進捗を jobs/{jobId}/agents/{name} に書き込むヘルパー
+    job_progress_enabled = bool(job_id and room_id_for_job)
+
+    def _write_agent_status(agent_name: str, status: str, error_msg: Optional[str] = None) -> None:
+        if not job_progress_enabled:
+            return
+        try:
+            update = {"status": status}
+            if error_msg is not None:
+                update["error"] = str(error_msg)[:200]
+            db.reference(
+                f"rooms/{room_id_for_job}/jobs/{job_id}/agents/{agent_name}"
+            ).update(update)
+        except Exception as progress_err:
+            logger.warning(
+                f"[orchestrate job={job_id}] Failed to write agent status "
+                f"{agent_name}={status}: {progress_err}"
+            )
+
+    async def _run_agent_with_progress(agent_name: str, agent_coro):
+        _write_agent_status(agent_name, "running")
+        await agent_coro
+        agent_result = results_from_agents.get(agent_name, {})
+        if isinstance(agent_result, dict) and "error" in agent_result:
+            _write_agent_status(agent_name, "error", agent_result.get("error"))
+        else:
+            _write_agent_status(agent_name, "done")
+
     agent_tasks = []
 
     for action in dispatch_actions:
@@ -1122,17 +1211,19 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             logger.info(
                 f"Scheduling agent: {agent_name} with model={agent_model}, instruction: '{instruction}'")
             agent_instructions_map[agent_name] = instruction
+            inner_coro = process_single_agent(
+                agent_instance,
+                task_payload,
+                agent_name,
+                instruction,
+                results_from_agents,
+                llm_transcript_messages,
+                model_name=agent_model,
+                api_key=agent_key,
+            )
             task = asyncio.create_task(
-                process_single_agent(
-                    agent_instance,
-                    task_payload,
-                    agent_name,
-                    instruction,
-                    results_from_agents,
-                    llm_transcript_messages,
-                    model_name=agent_model,
-                    api_key=agent_key
-                )
+                _run_agent_with_progress(agent_name, inner_coro)
+                if job_progress_enabled else inner_coro
             )
             agent_tasks.append(task)
             active_agent_names.append(agent_name)
@@ -1275,14 +1366,18 @@ async def _run_invoke_job(
                     "representativeMode": room_ref.child("representativeMode").get() or False,
                 }
 
-                # Orchestrator + Agents 実行
+                # Orchestrator + Agents 実行 (per-agent 進捗を jobs/{jobId}/agents に書く)
                 # NOTE: orchestrate_agents の background_tasks 引数は内部未使用。
                 # vision pipeline と同じ dummy を渡す。
                 from fastapi import BackgroundTasks as BT
                 dummy_bg = BT()
                 agent_result = await orchestrate_agents(
                     task_payload, dummy_bg, recent_entries,
-                    task_payload.llmApiKey, session_data=session_data, room_data=room_data,
+                    task_payload.llmApiKey,
+                    session_data=session_data,
+                    room_data=room_data,
+                    job_id=job_id,
+                    room_id_for_job=room_id,
                 )
 
                 # ★ 後続 job が同じ user message を再処理しないよう必ず更新
