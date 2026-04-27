@@ -2,7 +2,7 @@ import React from 'react';
 import { GripVertical, EyeOff } from 'lucide-react';
 import { getPanelConfig } from '@/app/room/constants/panelConfig';
 import { themes } from '@/constants/themes';
-import { ParticipantEntry, NoteItem, TodoItem, CurrentAgenda, OverviewDiagramData, PanelId, TranscriptEntry } from '@/types/data';
+import { ParticipantEntry, NoteItem, TodoItem, CurrentAgenda, OverviewDiagramData, PanelId, TranscriptEntry, SpeakerMap } from '@/types/data';
 import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
 import ExportDropdown from '@/components/export/ExportDropdown';
 import type { ExportOption } from '@/components/export/ExportDropdown';
@@ -19,7 +19,8 @@ interface PanelProps {
   overviewDiagramData: OverviewDiagramData | null;
   currentTheme: typeof themes.dark;
   themeType: 'light' | 'dark' | 'modern';
-  chatHistory: Array<{ id: number; user: string; avatar: string; message: string; timestamp: string; type: 'chat' | 'system' }>;
+  chatHistory: Array<{ id: number; user: string; avatar: string; message: string; timestamp: string; type: 'chat' | 'system'; userId?: string; speakerId?: string; speakerLabel?: string }>;
+  speakerMap: SpeakerMap;
   onDragStart: (e: React.DragEvent, id: PanelId) => void;
   onDragEnd: () => void;
   onTouchStart: (e: React.TouchEvent, id: PanelId, idx: number) => void;
@@ -49,6 +50,7 @@ const Panel = ({
   currentTheme,
   themeType,
   chatHistory,
+  speakerMap,
   onDragStart,
   onDragEnd,
   onTouchStart,
@@ -63,8 +65,8 @@ const Panel = ({
   diagramRef,
 }: PanelProps) => {
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave, diagramRef),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, onParticipantEnter, onParticipantLeave, diagramRef]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, speakerMap, onParticipantEnter, onParticipantLeave, diagramRef),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, currentTheme, themeType, chatHistory, transcripts, speakerMap, onParticipantEnter, onParticipantLeave, diagramRef]
   );
 
   const cfg = panelConfig[id];
