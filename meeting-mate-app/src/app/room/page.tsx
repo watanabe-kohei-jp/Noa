@@ -9,6 +9,7 @@ import Link from 'next/link';
 import { useRoomData } from '@/hooks/useRoomData';
 import { useBackendTTS } from '@/hooks/useBackendTTS';
 import { useBackendApi } from '@/hooks/useBackendApi';
+import { useInvokeJob, type InvokeJobAgentStatus } from '@/hooks/useInvokeJob';
 import { useFlashMessages } from '@/hooks/useFlashMessages';
 import { useSharedAudioStream } from '@/hooks/useSharedAudioStream';
 import { useStreamingSTT } from '@/hooks/useStreamingSTT';
@@ -75,6 +76,12 @@ export default function RoomPage() {
   const [currentTheme, setCurrentTheme] = useState<'light' | 'dark' | 'modern'>('light'); // デフォルトはライトテーマ
   const [modalContent, setModalContent] = useState<{ title: string; children: React.ReactNode; panelId?: PanelId } | null>(null);
   const [processingAgents, setProcessingAgents] = useState<string[]>([]); // 処理中のエージェント名
+  // Issue #129: 現在 UI に表示する /invoke job。null = 表示すべき進行中 job が無い状態。
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  // 連続 STT 上書き対策: activeJobId が未終端のあいだに来た新規 jobId を queue に積む
+  const pendingJobIdsRef = useRef<string[]>([]);
+  // 各 agent の最後に観測した status (per-agent done のエッジ検出用)
+  const lastAgentsRef = useRef<Record<string, InvokeJobAgentStatus>>({});
 
   // Mermaid 図エクスポート用 ref
   const diagramRef = useRef<MermaidDiagramHandle>(null);
@@ -212,6 +219,9 @@ export default function RoomPage() {
   const { callBackendApi } = useBackendApi();
   const { triggerFlash } = useFlashMessages();
 
+  // Issue #129: 現在 UI に反映する /invoke job を購読
+  const job = useInvokeJob(currentRoomId, activeJobId);
+
   // Live AI テキスト送信 API
   const livePanelApiRef = useRef<LivePanelAPI | null>(null);
   const lastAgentNotifyRef = useRef<number>(0);
@@ -225,21 +235,114 @@ export default function RoomPage() {
     speakerMap,
   });
 
-  // Agent 結果を Live AI に通知（デバウンス付き）
-  const notifyLiveAI = useCallback((result: Record<string, unknown>) => {
+  // Issue #129: invokedAgents 配列から Live AI 通知用の概要文を生成
+  const notifyLiveAIFromAgents = useCallback((invokedAgents: string[]) => {
+    if (!invokedAgents?.length) return;
     const now = Date.now();
     if (now - lastAgentNotifyRef.current < 10000) return; // 10秒デバウンス
-    const agents = result.invokedAgents as string[] | undefined;
-    if (!agents?.length) return;
     const parts: string[] = [];
-    if (result.updatedTasks) parts.push("タスク更新");
-    if (result.updatedMinutes) parts.push("メモ更新");
-    if (result.updatedAgenda) parts.push("議題更新");
-    if (result.updatedOverviewDiagram) parts.push("概要図更新");
-    if (parts.length === 0) parts.push(agents.join(", "));
-    const summary = parts.join("、");
+    if (invokedAgents.includes('TaskManagementAgent')) parts.push('タスク更新');
+    if (invokedAgents.includes('NotesGeneratorAgent')) parts.push('メモ更新');
+    if (invokedAgents.includes('AgendaManagementAgent')) parts.push('議題更新');
+    if (invokedAgents.includes('OverviewDiagramAgent')) parts.push('概要図更新');
+    if (invokedAgents.includes('ParticipantManagementAgent')) parts.push('参加者更新');
+    if (parts.length === 0) parts.push(invokedAgents.join(', '));
+    const summary = parts.join('、');
     livePanelApiRef.current?.sendText(`【会議情報更新】${summary}`);
     lastAgentNotifyRef.current = now;
+  }, []);
+
+  // Issue #129: agent 完了時に対応するパネルの flash を発火
+  const triggerFlashForAgent = useCallback((agentName: string) => {
+    switch (agentName) {
+      case 'TaskManagementAgent':
+        triggerFlash('issues');
+        break;
+      case 'NotesGeneratorAgent':
+        triggerFlash('tasks_minutes');
+        break;
+      case 'AgendaManagementAgent':
+        triggerFlash('currentTopic');
+        triggerFlash('suggestedNextTopic');
+        break;
+      case 'OverviewDiagramAgent':
+        triggerFlash('overviewDiagram');
+        break;
+      case 'ParticipantManagementAgent':
+        triggerFlash('participants');
+        break;
+    }
+  }, [triggerFlash]);
+
+  // Issue #129: job state の変化を UI に反映
+  // - running: 処理中エージェント表示
+  // - 各 agent done: 対応するパネルを flash
+  // - status=done: Live AI 通知 + 1s 後 processingAgents クリア + 次の jobId に切替
+  // - status=error: chat に system message + 次の jobId に切替
+  // 注意: setActiveJobId 直後の再レンダーでは job.jobId が前 job のまま残るため、
+  //       job.jobId !== activeJobId のときはスタール状態と見なしてスキップする。
+  useEffect(() => {
+    if (!activeJobId) {
+      lastAgentsRef.current = {};
+      return;
+    }
+    // スタール検知: useInvokeJob が新 jobId を反映する前の古い snapshot は無視
+    if (job.jobId !== activeJobId) {
+      return;
+    }
+
+    // running: 処理中エージェント表示を更新
+    if (job.status === 'running' && job.invokedAgents.length > 0) {
+      setProcessingAgents(job.invokedAgents);
+    }
+
+    // per-agent 完了エッジ検出 → flash
+    const prev = lastAgentsRef.current;
+    for (const [name, statusObj] of Object.entries(job.agents)) {
+      const wasDone = prev[name]?.status === 'done';
+      const isDone = statusObj.status === 'done';
+      if (!wasDone && isDone) {
+        triggerFlashForAgent(name);
+      }
+    }
+    lastAgentsRef.current = job.agents;
+
+    // 終端到達 → Live AI 通知 + 次の job に切替
+    if (job.status === 'done') {
+      notifyLiveAIFromAgents(job.invokedAgents);
+      setTimeout(() => {
+        setProcessingAgents([]);
+      }, 1000);
+      lastAgentsRef.current = {};
+      // 上書きキューから次を取り出して切替 (なければ null)
+      const nextJobId = pendingJobIdsRef.current.shift() ?? null;
+      setActiveJobId(nextJobId);
+    } else if (job.status === 'error') {
+      const errorMessage = job.error?.message || '不明なエラー';
+      const systemErrorEntry = {
+        id: Date.now(),
+        user: 'システム',
+        avatar: 'SYS',
+        message: `エラー: ${errorMessage}`,
+        timestamp: new Date().toISOString(),
+        type: 'system' as const,
+        userId: 'system',
+      };
+      setChatHistory((prevHistory) => [...prevHistory, systemErrorEntry]);
+      setProcessingAgents([]);
+      lastAgentsRef.current = {};
+      const nextJobId = pendingJobIdsRef.current.shift() ?? null;
+      setActiveJobId(nextJobId);
+    }
+  }, [activeJobId, job, triggerFlashForAgent, notifyLiveAIFromAgents]);
+
+  // Issue #129: 新規 jobId を受け取り、未終端 job があれば queue に積む
+  const enqueueJobId = useCallback((jobId: string) => {
+    setActiveJobId((current) => {
+      if (current === null) return jobId;
+      pendingJobIdsRef.current.push(jobId);
+      return current;
+    });
   }, []);
 
   // Streaming STT の final 結果を処理: Firebase書き込み + AI分析トリガー
@@ -268,28 +371,16 @@ export default function RoomPage() {
       };
 
       try {
-        const backendResponse = await callBackendApi(newEntry, currentRoomId, pageCurrentUser, currentSessionId);
-        if (backendResponse && backendResponse.result) {
-          const { result: apiResult } = backendResponse;
-          if (apiResult.invokedAgents) setProcessingAgents(apiResult.invokedAgents);
-          if (apiResult.updatedTasks) triggerFlash('issues');
-          if (apiResult.updatedParticipants) triggerFlash('participants');
-          if (apiResult.updatedMinutes) triggerFlash('tasks_minutes');
-          if (apiResult.updatedAgenda) {
-            if (apiResult.updatedAgenda.currentAgenda?.mainTopic) triggerFlash('currentTopic');
-            if (apiResult.updatedAgenda.suggestedNextTopics) triggerFlash('suggestedNextTopic');
-          }
-          if (apiResult.updatedOverviewDiagram) triggerFlash('overviewDiagram');
-          // Agent 結果を Live AI に通知
-          notifyLiveAI(apiResult);
+        const accepted = await callBackendApi(newEntry, currentRoomId, pageCurrentUser, currentSessionId);
+        // Issue #129: 202 受領なら jobId を購読対象に登録。null = デモルーム同期パス (AI 処理なし)
+        if (accepted?.jobId) {
+          enqueueJobId(accepted.jobId);
         }
       } catch (apiError: Error | unknown) {
         console.error("Error sending streaming STT transcript to backend:", apiError);
-      } finally {
-        setTimeout(() => setProcessingAgents([]), 1000);
       }
     }
-  }, [addSTTResult, callBackendApi, currentRoomId, currentSessionId, pageCurrentUser, speakerMap, triggerFlash, notifyLiveAI]);
+  }, [addSTTResult, callBackendApi, currentRoomId, currentSessionId, pageCurrentUser, speakerMap, enqueueJobId]);
 
   const {
     startSTT: startStreamingSTT,
@@ -889,22 +980,11 @@ export default function RoomPage() {
         role: "user"
       };
       triggerFlash('transcript');
-      setProcessingAgents([]);
       try {
-        const backendResponse = await callBackendApi(newEntry, currentRoomId, pageCurrentUser, currentSessionId);
-        if (backendResponse && backendResponse.result) {
-          const { result } = backendResponse;
-          if (result.invokedAgents) setProcessingAgents(result.invokedAgents);
-          if (result.updatedTasks) triggerFlash('issues');
-          if (result.updatedParticipants) triggerFlash('participants');
-          if (result.updatedMinutes) triggerFlash('tasks_minutes');
-          if (result.updatedAgenda) {
-            if (result.updatedAgenda.currentAgenda?.mainTopic) triggerFlash('currentTopic');
-            if (result.updatedAgenda.suggestedNextTopics) triggerFlash('suggestedNextTopic');
-          }
-          if (result.updatedOverviewDiagram) triggerFlash('overviewDiagram');
-          // Agent 結果を Live AI に通知
-          notifyLiveAI(result);
+        const accepted = await callBackendApi(newEntry, currentRoomId, pageCurrentUser, currentSessionId);
+        // Issue #129: 202 受領なら jobId を購読対象に登録。null = デモルーム同期パス
+        if (accepted?.jobId) {
+          enqueueJobId(accepted.jobId);
         }
       } catch (apiError: Error | unknown) {
         console.error("Error sending manual transcript to backend:", apiError);
@@ -922,12 +1002,10 @@ export default function RoomPage() {
         };
 
         setChatHistory(prev => [...prev, systemErrorEntry]);
-      } finally {
-        setTimeout(() => setProcessingAgents([]), 1000);
       }
       setMessage('');
     }
-  }, [message, pageCurrentUser, currentRoomId, currentSessionId, callBackendApi, triggerFlash, notifyLiveAI]);
+  }, [message, pageCurrentUser, currentRoomId, currentSessionId, callBackendApi, triggerFlash, enqueueJobId]);
 
   const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
