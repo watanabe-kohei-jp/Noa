@@ -200,7 +200,9 @@ export default function RoomPage() {
         message: t.text,
         timestamp: t.timestamp,
         type: (t.role === "ai" ? "system" : "chat") as 'chat' | 'system',
-        userId: t.userId // userIdを追加
+        userId: t.userId,
+        speakerId: t.speakerId,
+        speakerLabel: t.speakerLabel,
       }));
       setChatHistory(newChatHistory);
     }
@@ -566,8 +568,8 @@ export default function RoomPage() {
   }, []);
 
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, calendarLinks]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, speakerMap, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, speakerMap, handleParticipantEnter, handleParticipantLeave, calendarLinks]
   );
 
   // パネルごとのエクスポートオプションを生成
@@ -726,6 +728,7 @@ export default function RoomPage() {
                       currentTheme={selectedTheme}
                       themeType={currentTheme}
                       chatHistory={chatHistory}
+                      speakerMap={speakerMap}
                       onDragStart={onDragStart}
                       onDragEnd={onDragEnd}
                       onTouchStart={handleTouchStart}
@@ -804,6 +807,7 @@ export default function RoomPage() {
               currentTheme={selectedTheme}
               themeType={currentTheme}
               chatHistory={chatHistory}
+              speakerMap={speakerMap}
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
               onTouchStart={handleTouchStart}
@@ -1157,7 +1161,7 @@ export default function RoomPage() {
                 />
               ) : modalContent.panelId === 'conversationHistory' ? (
                 <div className="h-full p-4 overflow-y-auto">
-                  <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={selectedTheme} />
+                  <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={selectedTheme} speakerMap={speakerMap} />
                 </div>
               ) : modalContent.panelId === 'participants' ? (
                 <div className="h-full p-4">
