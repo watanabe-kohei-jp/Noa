@@ -67,10 +67,7 @@ resource "google_cloud_run_v2_service" "backend" {
       ports {
         container_port = 8000 # FastAPIがリッスンするポート (DockerfileでEXPOSEするポート)
       }
-      env {
-        name  = "FIREBASE_DATABASE_URL"
-        value = var.firebase_database_url
-      }
+      # 非機密値は平文 env で注入
       env {
         name  = "PROJECT_ID"
         value = var.project_id
@@ -80,14 +77,61 @@ resource "google_cloud_run_v2_service" "backend" {
         value = var.location
       }
       env {
-        name  = "ENCRYPTION_KEY"
-        value = var.encryption_key
-      }
-      env {
         name  = "LLM_MODEL"
         value = var.llm_model
       }
+
+      # 機密値は Secret Manager から注入 (Issue #135)
+      env {
+        name = "FIREBASE_DATABASE_URL"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-firebase-database-url"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "ENCRYPTION_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-encryption-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "GEMINI_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-gemini-api-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "OPENAI_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-openai-api-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "ANTHROPIC_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-anthropic-api-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
     }
+
+    # Secret 取得権限は secrets.tf の secret_iam_member で付与済み
+    # ここでは secret IAM が先に存在することを保証
+    depends_on = [google_secret_manager_secret_iam_member.cloud_run_sa_accessor]
     scaling {
       min_instance_count = 0 # リクエストがない場合は0にスケールダウン (コスト削減)
       max_instance_count = 1 # 最大インスタンス数を1に制限 (開発環境でのコスト削減)

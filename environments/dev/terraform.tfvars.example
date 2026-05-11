@@ -1,5 +1,11 @@
-project_id = "your-gcp-project-id"
-location = "us-central1"
-firebase_database_url = "https://your-project-default-rtdb.firebaseio.com/"
-encryption_key = "your-base64-encoded-encryption-key"
-llm_model = "gemini-2.5-flash"
+project_id        = "your-gcp-project-id"
+location          = "us-central1"
+llm_model         = "gemini-2.5-flash"
+github_repository = "ko-dhinngumuzuiyoo/meeting-mate"
+
+# 機密値 (FIREBASE_DATABASE_URL, ENCRYPTION_KEY, GEMINI_API_KEY,
+# OPENAI_API_KEY, ANTHROPIC_API_KEY) は Secret Manager 経由で注入する。
+# Terraform apply 後に以下を実行:
+#   echo -n "<value>" | gcloud secrets versions add noa-dev-<name> \
+#     --data-file=- --project=<PROJECT_ID>
+# 詳細は docs/infra/secrets.md を参照。
