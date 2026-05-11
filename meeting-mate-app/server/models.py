@@ -98,6 +98,16 @@ class OverviewDiagram(BaseModel):
     title: str
 
 
+class OverviewDiagramEntry(BaseModel):
+    """論点 (topic) 単位の概要図エントリ (Issue #131)"""
+    topicId: str
+    title: str
+    mermaidDefinition: str
+    status: str  # "active" | "closed"
+    createdAt: str
+    lastUpdated: str
+
+
 class CurrentAgenda(BaseModel):
     mainTopic: str
     details: List[Any] = []  # Assuming details can be flexible for now
