@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
 
+# Issue #135: WIF 認証ジョブ用に id-token を発行する権限が必要
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -122,4 +127,46 @@ jobs:
       - name: Terraform validate
         run: |
           terraform init
+          terraform validate
+
+  # Issue #135: Workload Identity Federation で GCP 認証できることを確認する
+  # GitHub Repository Variables に下記が設定されている場合のみ実行する。
+  #   vars.GCP_WIF_PROVIDER  : terraform output workload_identity_provider の値
+  #   vars.GCP_DEPLOYER_SA   : terraform output deployer_service_account_email の値
+  #   vars.GCP_PROJECT_ID    : GCP プロジェクト ID
+  # 詳細は docs/infra/wif.md を参照。
+  wif-auth-check:
+    runs-on: ubuntu-latest
+    if: vars.GCP_WIF_PROVIDER != '' && vars.GCP_DEPLOYER_SA != ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - id: auth
+        name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify authenticated identity
+        run: |
+          gcloud auth list
+          gcloud config list project
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform validate against environments/dev
+        working-directory: environments/dev
+        env:
+          TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+          TF_VAR_location: us-central1
+          TF_VAR_llm_model: gemini-2.5-flash
+        run: |
+          terraform init -backend=false
           terraform validate
