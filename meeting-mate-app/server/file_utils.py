@@ -1,5 +1,5 @@
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import db
 import os
 from typing import Dict, Any, Optional
 from config import logger
@@ -40,36 +40,20 @@ def save_json(data: Dict[str, Any], file_path: str):
         logger.error(f"Error saving JSON to {file_path}: {e}", exc_info=True)
 
 
-# Firebase Admin SDKの初期化
-# GOOGLE_APPLICATION_CREDENTIALS環境変数が設定されていれば、自動的に認証情報が使用される
-# DATABASE_URLは環境変数から取得するか、直接指定する
+# Firebase Admin SDK の初期化 (Issue #135: SA JSON 依存を廃止し ADC に統一)
+# - Cloud Run: runtime service account のトークンを自動取得
+# - ローカル: `gcloud auth application-default login` で発行された短命トークン
+# main.py 側で既に初期化されていればスキップする (重複初期化を防ぐ)。
 try:
-    FIREBASE_DATABASE_URL = os.getenv("FIREBASE_DATABASE_URL")
-    if not FIREBASE_DATABASE_URL:
-        logger.warning(
-            "FIREBASE_DATABASE_URL is not set. Firebase Admin SDK might not work correctly.")
-        # ローカル開発用にフォールバックURLを設定することも可能だが、本番では環境変数設定を推奨
-        # FIREBASE_DATABASE_URL = "https://your-project-id.firebaseio.com" # 例
-
-    # クレデンシャルファイルのパスを解決 (CWDに依存しない)
-    _cred_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    _server_dir = os.path.dirname(os.path.abspath(__file__))
-    _cred_fallback = os.path.join(_server_dir, "aimeebo-firebase-adminsdk-fbsvc-66b668e015.json")
-
-    if _cred_env and os.path.isfile(_cred_env):
-        cred = credentials.Certificate(_cred_env)
-    elif os.path.isfile(_cred_fallback):
-        cred = credentials.Certificate(_cred_fallback)
-    else:
-        cred = credentials.ApplicationDefault()
-
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': FIREBASE_DATABASE_URL
-    })
-    logger.info("Firebase Admin SDK initialized successfully.")
+    if not firebase_admin._apps:
+        FIREBASE_DATABASE_URL = os.getenv("FIREBASE_DATABASE_URL")
+        if not FIREBASE_DATABASE_URL:
+            logger.warning(
+                "FIREBASE_DATABASE_URL is not set. Firebase Admin SDK might not work correctly.")
+        firebase_admin.initialize_app(options={"databaseURL": FIREBASE_DATABASE_URL})
+        logger.info("Firebase Admin SDK initialized (ADC) from file_utils.")
 except Exception as e:
     logger.error(f"Error initializing Firebase Admin SDK: {e}", exc_info=True)
-    # SDK初期化失敗時は、以降のDB操作が失敗する可能性があることを警告
 
 
 DEFAULT_ROOM_STRUCTURE = {

@@ -1,10 +1,12 @@
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import db
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Issue #135: SA JSON 依存を廃止し、Application Default Credentials (ADC) を使用。
+# ローカル実行時は事前に `gcloud auth application-default login` を実行すること。
 try:
     database_url = os.getenv('FIREBASE_DATABASE_URL')
     if not database_url:
@@ -16,24 +18,9 @@ try:
             raise ValueError(
                 "FIREBASE_DATABASE_URL and GCP_PROJECT_ID not set.")
 
-    # Firebase Admin SDKの初期化（既に初期化されている場合はスキップ）
     if not firebase_admin._apps:
-        # サービスアカウントキーファイルのパスを取得
-        # 環境変数 GOOGLE_APPLICATION_CREDENTIALS が設定されていることを想定
-        cred_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-        if not cred_path or not os.path.exists(cred_path):
-            # もし環境変数がない場合、特定のパスを試す（例: /workspaces/meeting-mate/sa-vertex-functions.json）
-            # これは環境に依存するため、ユーザーに確認するか、より汎用的な方法を検討する必要があるかもしれません。
-            # 今回は、環境変数があることを前提とします。
-            print(
-                "GOOGLE_APPLICATION_CREDENTIALS environment variable not set or file not found.")
-            # エラーとして扱うか、別の認証方法を試すか検討
-            # ここではエラーとして終了します
-            exit(1)
-
-        cred = credentials.Certificate(cred_path)
-        firebase_admin.initialize_app(cred, {'databaseURL': database_url})
-        print("Firebase Admin SDK initialized.")
+        firebase_admin.initialize_app(options={'databaseURL': database_url})
+        print("Firebase Admin SDK initialized (ADC).")
     else:
         print("Firebase Admin SDK already initialized.")
 

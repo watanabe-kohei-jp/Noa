@@ -22,8 +22,10 @@ resource "google_project_service" "firebase_apis" {
     # "firebasedatabase.googleapis.com",   # Firebase Realtime Database API (手動管理のためコメントアウト)
     "identitytoolkit.googleapis.com",      # Firebase Authentication (Identity Platform)
     "cloudresourcemanager.googleapis.com", # Project連携に必要
-    "serviceusage.googleapis.com"          # サービス利用状況の確認等
-    # 他に必要なAPIがあれば追加
+    "serviceusage.googleapis.com",         # サービス利用状況の確認等
+    "secretmanager.googleapis.com",        # Secret Manager (Issue #135)
+    "iamcredentials.googleapis.com",       # WIF で SA を impersonate するために必要 (Issue #135)
+    "sts.googleapis.com",                  # Workload Identity Federation (Issue #135)
   ])
   service                    = each.key
   disable_dependent_services = false # trueにすると依存サービスも無効化されるので注意
@@ -65,10 +67,7 @@ resource "google_cloud_run_v2_service" "backend" {
       ports {
         container_port = 8000 # FastAPIがリッスンするポート (DockerfileでEXPOSEするポート)
       }
-      env {
-        name  = "FIREBASE_DATABASE_URL"
-        value = var.firebase_database_url
-      }
+      # 非機密値は平文 env で注入
       env {
         name  = "PROJECT_ID"
         value = var.project_id
@@ -78,14 +77,58 @@ resource "google_cloud_run_v2_service" "backend" {
         value = var.location
       }
       env {
-        name  = "ENCRYPTION_KEY"
-        value = var.encryption_key
-      }
-      env {
         name  = "LLM_MODEL"
         value = var.llm_model
       }
+
+      # 機密値は Secret Manager から注入 (Issue #135)
+      env {
+        name = "FIREBASE_DATABASE_URL"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-firebase-database-url"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "ENCRYPTION_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-encryption-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "GEMINI_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-gemini-api-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "OPENAI_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-openai-api-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "ANTHROPIC_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.app_secrets["noa-dev-anthropic-api-key"].secret_id
+            version = "latest"
+          }
+        }
+      }
     }
+
     scaling {
       min_instance_count = 0 # リクエストがない場合は0にスケールダウン (コスト削減)
       max_instance_count = 1 # 最大インスタンス数を1に制限 (開発環境でのコスト削減)
@@ -96,6 +139,9 @@ resource "google_cloud_run_v2_service" "backend" {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
   }
+
+  # Secret 取得権限 (secrets.tf の secret_iam_member) が先に作成されることを保証
+  depends_on = [google_secret_manager_secret_iam_member.cloud_run_sa_accessor]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "allow_unauthenticated" {

@@ -16,7 +16,7 @@ from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
-from firebase_admin import credentials, auth as firebase_auth, db
+from firebase_admin import auth as firebase_auth, db
 import firebase_admin
 import os
 import json
@@ -214,28 +214,10 @@ def _recover_stale_jobs() -> int:
 
 load_dotenv()
 
-# --- クレデンシャルパス解決ヘルパー ---
-# .env の GOOGLE_APPLICATION_CREDENTIALS はプロジェクトルート基準 (./server/xxx.json)
-# uvicorn を server/ から起動すると壊れるため、実ファイルの存在を確認して修正する
-def _resolve_credentials_path() -> str:
-    """GCP クレデンシャルファイルのパスを解決する"""
-    from config import FIREBASE_CREDENTIALS_PATH
-    # 1. GOOGLE_APPLICATION_CREDENTIALS 環境変数
-    env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if env_path and os.path.isfile(env_path):
-        return env_path
-    # 2. config.py の FIREBASE_CREDENTIALS_PATH
-    if FIREBASE_CREDENTIALS_PATH and os.path.isfile(FIREBASE_CREDENTIALS_PATH):
-        return FIREBASE_CREDENTIALS_PATH
-    # 3. server/ ディレクトリ基準で FIREBASE_CREDENTIALS_PATH を試す
-    if FIREBASE_CREDENTIALS_PATH:
-        server_dir = os.path.dirname(os.path.abspath(__file__))
-        resolved = os.path.join(server_dir, os.path.basename(FIREBASE_CREDENTIALS_PATH))
-        if os.path.isfile(resolved):
-            return resolved
-    logger.warning("Firebase credentials not found. Set GOOGLE_APPLICATION_CREDENTIALS env var.")
-    return env_path or ""
-
+# Firebase Admin SDK は Application Default Credentials (ADC) を使用する。
+# - Cloud Run: runtime service account から自動取得
+# - ローカル: `gcloud auth application-default login` で取得した短命トークン
+# Issue #135 で SA JSON ファイル依存を廃止。
 try:
     database_url = os.getenv('FIREBASE_DATABASE_URL')
     if not database_url:
@@ -247,13 +229,8 @@ try:
             raise ValueError(
                 "FIREBASE_DATABASE_URL and GCP_PROJECT_ID not set.")
     if not firebase_admin._apps:
-        cred_path = _resolve_credentials_path()
-        if cred_path and os.path.isfile(cred_path):
-            cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred, options={'databaseURL': database_url})
-        else:
-            firebase_admin.initialize_app(options={'databaseURL': database_url})
-    logger.info("Firebase Admin SDK initialized.")
+        firebase_admin.initialize_app(options={'databaseURL': database_url})
+    logger.info("Firebase Admin SDK initialized (ADC).")
 except Exception as e:
     logger.error(f"Error initializing Firebase Admin SDK: {e}")
 

@@ -166,7 +166,8 @@
 *   **データベース**: Firebase Realtime Databaseを使用します。データ構造は[こちら](#firebase-realtime-database-スキーマ案)を参照。
 *   **AI**:引き続きVertex AIを利用します。
 *   **CI/CD**: Cloud Buildを利用して、ソースコードの変更をトリガーに自動でビルドとデプロイを行います（予定）。
-*   **Secrets Management**: APIキーやデータベース接続情報などの機密情報はSecret Managerで管理し、Cloud Runから安全に参照します（予定）。
+*   **Secrets Management**: APIキーやデータベース接続情報などの機密情報は Secret Manager で管理し、Cloud Run の `value_source.secret_key_ref` 経由で安全に参照します（Issue #135 で実装）。命名規則と運用手順は [`docs/infra/secrets.md`](docs/infra/secrets.md) を参照。
+*   **GitHub Actions 認証**: SA JSON 方式を廃止し、Workload Identity Federation (OIDC) で短命トークンを取得します（Issue #135 で実装）。詳細は [`docs/infra/wif.md`](docs/infra/wif.md) を参照。
 *   **インフラ管理**: Terraformを使用して、上記のリソースをコードで管理します。構成ファイルは `environments/` ディレクトリに配置します。
 
 ### Firebase Realtime Database 当初スキーマ案
@@ -349,7 +350,17 @@
 ### 必要なもの
 *   Node.js, npm
 *   Python 3.x, pip
-*   Google CloudプロジェクトとVertex AI APIの有効化、認証設定（`GOOGLE_APPLICATION_CREDENTIALS` 環境変数の設定など）。
+*   Google Cloud SDK (`gcloud`)
+*   Google Cloud プロジェクト (Vertex AI / Firebase / Cloud Run API 有効化)
+
+### GCP 認証 (Issue #135)
+SA JSON ファイル方式は廃止されました。ローカルでは Application Default Credentials (ADC) を使用します:
+
+```bash
+gcloud auth application-default login
+```
+
+これだけで `firebase-admin` / `google-cloud` SDK と `terraform` の両方が認証されます。Cloud Run 上では runtime service account のトークンが自動取得されるため追加設定不要です。
 
 ### 環境変数
 プロジェクトルートに `.env` ファイルを作成し、以下を設定します。`.env.example` ファイルをコピーして使用することをお勧めします。
@@ -359,15 +370,16 @@ cp .env.example .env
 ```
 
 設定が必要な主要な環境変数：
-- `PROJECT_ID`: あなたのGCPプロジェクトID
-- `REGION`: GCPリージョン（例: us-central1）
-- `LLM_MODEL`: 使用するVertex AIモデル名（例: gemini-2.5-flash）
-- `FIREBASE_DATABASE_URL`: Firebase Realtime DatabaseのURL
-- `GOOGLE_APPLICATION_CREDENTIALS`: サービスアカウントキーファイルのパス
-- `ENCRYPTION_KEY`: APIキー暗号化用のFernetキー
-- `GEMINI_API_KEY`: Gemini APIキー
-- `NEXT_PUBLIC_FIREBASE_CONFIG`: Firebase設定（JSON形式）
-- `NEXT_PUBLIC_BACKEND_API_URL`: バックエンドAPIのURL（開発時は http://127.0.0.1:8000）
+- `PROJECT_ID`: あなたの GCP プロジェクト ID
+- `REGION`: GCP リージョン（例: us-central1）
+- `LLM_MODEL`: 使用する LLM モデル名（例: gemini-2.5-flash）
+- `FIREBASE_DATABASE_URL`: Firebase Realtime Database の URL
+- `ENCRYPTION_KEY`: API キー暗号化用の Fernet キー
+- `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`: 各 LLM プロバイダー API キー
+- `NEXT_PUBLIC_FIREBASE_CONFIG`: Firebase 設定（JSON 形式）
+- `NEXT_PUBLIC_BACKEND_API_URL`: バックエンド API の URL（開発時は http://127.0.0.1:8000）
+
+> **本番 (Cloud Run)** ではこれらの機密値を `.env` ではなく Google Secret Manager に保管し、Cloud Run の secret 注入で環境変数として供給します。詳細は [`docs/infra/secrets.md`](docs/infra/secrets.md)。
 
 **重要**: `NEXT_PUBLIC_BACKEND_API_URL` 環境変数は不要になりました。API呼び出しは相対URL（例: `/invoke`）で行われ、環境に応じて自動的にルーティングされます。
 
@@ -381,14 +393,17 @@ cp .env.example .env
 
 ### 2. GCPプロジェクトの設定
 1. [Google Cloud Console](https://console.cloud.google.com/)でプロジェクトを作成
-2. 以下のAPIを有効化：
+2. 以下のAPIを有効化（Terraform が `environments/dev/main.tf` で有効化する API も含む）：
    - Vertex AI API
    - Firebase Realtime Database API
    - Cloud Run API（本番デプロイ時）
-3. サービスアカウントを作成し、以下の権限を付与：
-   - Firebase Admin SDK Administrator Service Agent
-   - Vertex AI User
-4. サービスアカウントキーをJSONファイルとしてダウンロード
+   - Secret Manager API（Issue #135）
+   - IAM Service Account Credentials API（WIF 用、Issue #135）
+3. ローカル開発用に ADC で認証：
+   ```bash
+   gcloud auth application-default login
+   ```
+   SA JSON ファイルのダウンロードは不要です（Issue #135 で廃止）。
 
 ### 3. Firebaseプロジェクトの設定
 1. [Firebase Console](https://console.firebase.google.com/)でプロジェクトを作成（既存のGCPプロジェクトを使用可能）
