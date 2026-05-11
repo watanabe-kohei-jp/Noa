@@ -129,9 +129,6 @@ resource "google_cloud_run_v2_service" "backend" {
       }
     }
 
-    # Secret 取得権限は secrets.tf の secret_iam_member で付与済み
-    # ここでは secret IAM が先に存在することを保証
-    depends_on = [google_secret_manager_secret_iam_member.cloud_run_sa_accessor]
     scaling {
       min_instance_count = 0 # リクエストがない場合は0にスケールダウン (コスト削減)
       max_instance_count = 1 # 最大インスタンス数を1に制限 (開発環境でのコスト削減)
@@ -142,6 +139,9 @@ resource "google_cloud_run_v2_service" "backend" {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
   }
+
+  # Secret 取得権限 (secrets.tf の secret_iam_member) が先に作成されることを保証
+  depends_on = [google_secret_manager_secret_iam_member.cloud_run_sa_accessor]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "allow_unauthenticated" {
