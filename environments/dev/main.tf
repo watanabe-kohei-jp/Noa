@@ -22,8 +22,10 @@ resource "google_project_service" "firebase_apis" {
     # "firebasedatabase.googleapis.com",   # Firebase Realtime Database API (手動管理のためコメントアウト)
     "identitytoolkit.googleapis.com",      # Firebase Authentication (Identity Platform)
     "cloudresourcemanager.googleapis.com", # Project連携に必要
-    "serviceusage.googleapis.com"          # サービス利用状況の確認等
-    # 他に必要なAPIがあれば追加
+    "serviceusage.googleapis.com",         # サービス利用状況の確認等
+    "secretmanager.googleapis.com",        # Secret Manager (Issue #135)
+    "iamcredentials.googleapis.com",       # WIF で SA を impersonate するために必要 (Issue #135)
+    "sts.googleapis.com",                  # Workload Identity Federation (Issue #135)
   ])
   service                    = each.key
   disable_dependent_services = false # trueにすると依存サービスも無効化されるので注意
