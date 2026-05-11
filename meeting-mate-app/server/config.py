@@ -55,9 +55,11 @@ VERTEX_AI_AVAILABLE = False
 # ============================================================
 # Firebase Configuration
 # ============================================================
+# Firebase Admin SDK 認証は Application Default Credentials (ADC) を使用する。
+# - Cloud Run: runtime service account の token を自動取得
+# - ローカル: `gcloud auth application-default login` で発行した短命トークンを使用
+# Issue #135 で SA JSON ファイル依存を廃止 (FIREBASE_CREDENTIALS_PATH 削除)。
 FIREBASE_DATABASE_URL = os.environ.get("FIREBASE_DATABASE_URL")
-FIREBASE_CREDENTIALS_PATH = os.environ.get(
-    "FIREBASE_CREDENTIALS_PATH", "./sa-vertex-functions.json")
 
 if not FIREBASE_DATABASE_URL:
     logger.warning(
