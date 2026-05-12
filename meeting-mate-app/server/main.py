@@ -14,6 +14,7 @@ from media_api import router as media_router
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
+from agents.overview_diagram_utils import slugify_topic_id
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
 from firebase_admin import credentials, auth as firebase_auth, db
@@ -24,7 +25,7 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 import logging
 import time
@@ -793,6 +794,105 @@ async def process_single_agent(
         results_dict[agent_name] = {"error": str(e)}
 
 
+async def _trigger_overview_closing_update(
+    task_payload: TaskPayload,
+    old_main_topic: str,
+    agent_model: str,
+    agent_key: str,
+) -> None:
+    """議題遷移後、旧 mainTopic の概要図を closing snapshot として更新する (Issue #131)。
+
+    process_single_agent を再利用してデータ取得・LLM 呼び出し・Firebase 書き込み
+    までを一貫して行う。失敗時は warning ログだけ残して落ちる (本流の応答には影響しない)。
+    """
+    topic_id_slug = slugify_topic_id(old_main_topic) or old_main_topic
+    instruction = (
+        f"議題が新しいトピックへ移行しました。これまで議論されていた論点 "
+        f"'{old_main_topic}' の概要図を、議論の最終形としてまとめてください。"
+    )
+    results_holder: Dict[str, Any] = {}
+    try:
+        await process_single_agent(
+            overview_diagram_agent,
+            task_payload,
+            "OverviewDiagramAgent",
+            instruction,
+            results_holder,
+            [],  # closing update は会話履歴を必要としない
+            model_name=agent_model,
+            api_key=agent_key,
+            agent_kwargs={
+                "target_topic_id": topic_id_slug,
+                "closing_update": True,
+            },
+        )
+        logger.info(
+            f"[#131] Closing update fired for topic='{old_main_topic}' (slug={topic_id_slug})"
+        )
+    except Exception as e:
+        logger.warning(
+            f"[#131] Closing update failed for topic='{old_main_topic}': {e}",
+            exc_info=True,
+        )
+
+
+def detect_agenda_topic_change(
+    old_session_data: Optional[Dict[str, Any]],
+    agenda_result: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """AgendaManagementAgent 実行前後の mainTopic を比較する純粋関数 (Issue #131)。
+
+    Returns:
+        (old_main_topic, new_main_topic): 変化が無い / 旧 mainTopic 不在 (= 初回設定) の場合は (None, None)。
+    """
+    if not old_session_data or not agenda_result:
+        return None, None
+    updated_data = agenda_result.get("data") if isinstance(agenda_result, dict) else None
+    if not isinstance(updated_data, dict):
+        return None, None
+    new_agenda = updated_data.get("currentAgenda")
+    if not isinstance(new_agenda, dict):
+        return None, None
+    new_main = (new_agenda.get("mainTopic") or "").strip()
+    old_agenda = old_session_data.get("currentAgenda")
+    old_main = ""
+    if isinstance(old_agenda, dict):
+        old_main = (old_agenda.get("mainTopic") or "").strip()
+    if not old_main or old_main == new_main:
+        return None, None
+    return old_main, new_main
+
+
+def _schedule_overview_closing_update_if_agenda_changed(
+    task_payload: TaskPayload,
+    old_session_data: Dict[str, Any],
+    agenda_result: Optional[Dict[str, Any]],
+    agent_models: Dict[str, str],
+    api_keys: Dict[str, str],
+    default_model: str,
+) -> None:
+    """AgendaManagementAgent の結果を見て mainTopic 変化を検知し、closing update を fire-and-forget で開始する。"""
+    old_main, new_main = detect_agenda_topic_change(old_session_data, agenda_result)
+    if not old_main:
+        return
+
+    od_model = agent_models.get("OverviewDiagramAgent", default_model)
+    od_provider = detect_provider(od_model)
+    od_key = api_keys.get(od_provider)
+    if not od_key:
+        logger.warning(
+            f"[#131] Cannot fire closing update: no API key for OverviewDiagramAgent (provider={od_provider})"
+        )
+        return
+
+    asyncio.create_task(
+        _trigger_overview_closing_update(task_payload, old_main, od_model, od_key)
+    )
+    logger.info(
+        f"[#131] Scheduled overview closing update: old='{old_main}' new='{new_main}'"
+    )
+
+
 async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None, session_data: Optional[Dict[str, Any]] = None, room_data: Optional[Dict[str, Any]] = None):
     logger.info(
         f"Orchestrating agents for task: {task_payload.taskId}, room: {task_payload.roomId}")
@@ -1017,6 +1117,17 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 
     if agent_tasks:
         await asyncio.gather(*agent_tasks)
+
+    # Issue #131: agenda 遷移検知 → 旧 mainTopic の closing update を非同期発火
+    if "AgendaManagementAgent" in active_agent_names and session_data:
+        _schedule_overview_closing_update_if_agenda_changed(
+            task_payload=task_payload,
+            old_session_data=session_data,
+            agenda_result=results_from_agents.get("AgendaManagementAgent"),
+            agent_models=agent_models,
+            api_keys=api_keys,
+            default_model=default_model,
+        )
 
     # エージェントへの指示をトランスクリプトに追記
     session_data_path = get_session_data_path(task_payload.roomId, task_payload.sessionId)
