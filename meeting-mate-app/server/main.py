@@ -701,7 +701,8 @@ def _resolve_api_keys(room_id: str, room_config: dict, agent_models: dict, defau
 async def process_single_agent(
     agent, task_payload: TaskPayload, agent_name: str, instruction_text: str,
     results_dict: dict, conversation_history_for_agent: List[LLMMessage],
-    model_name: str, api_key: str
+    model_name: str, api_key: str,
+    agent_kwargs: Optional[Dict[str, Any]] = None,
 ):
     logger.info(
         f"Invoking {agent_name} for task {task_payload.taskId} in room {task_payload.roomId} "
@@ -742,17 +743,43 @@ async def process_single_agent(
                 "model_name": model_name,
                 "api_key": api_key,
             }
+            if agent_kwargs:
+                # dispatcher が action 由来で渡す追加引数 (例: target_topic_id, closing_update)
+                agent_specific_args.update(agent_kwargs)
             updated_data_from_agent, user_message_text = await agent.execute(**agent_specific_args)
 
             if updated_data_from_agent:
                 for key, value in updated_data_from_agent.items():
-                    if value is not None:
-                        db_key = key
-                        if key == "agenda":
-                            db_key = "currentAgenda"
-                        elif key == "overview_diagram":
-                            db_key = "overviewDiagram"
-                        db.reference(f"{session_data_path}/{db_key}").set(value)
+                    if value is None:
+                        continue
+                    # Issue #131: overviewDiagrams は topicId をキーにした per-topic 書き込み
+                    if key == "overviewDiagrams":
+                        if isinstance(value, list):
+                            for entry in value:
+                                if not isinstance(entry, dict):
+                                    continue
+                                topic_id = entry.get("topicId")
+                                if not topic_id:
+                                    continue
+                                db.reference(
+                                    f"{session_data_path}/overviewDiagrams/{topic_id}"
+                                ).set(entry)
+                            # 新スキーマで書き込み成功 → 旧 overviewDiagram (単数) を削除
+                            try:
+                                db.reference(
+                                    f"{session_data_path}/overviewDiagram"
+                                ).delete()
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to delete legacy overviewDiagram key: {e}"
+                                )
+                        continue
+                    db_key = key
+                    if key == "agenda":
+                        db_key = "currentAgenda"
+                    elif key == "overview_diagram":
+                        db_key = "overviewDiagram"
+                    db.reference(f"{session_data_path}/{db_key}").set(value)
 
             results_dict[agent_name] = {
                 "data": updated_data_from_agent, "message": user_message_text}
@@ -878,7 +905,10 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 - **TaskManagementAgent**: 会議中のタスク（TODO、進行中、完了）の追加、更新、削除、担当者や期限の設定など、タスクリストの管理を行います。
 - **NotesGeneratorAgent**: 会議中の重要なメモ、決定事項、課題などを記録・要約し、ノートリストを生成・更新します。
 - **AgendaManagementAgent**: 会議の主要議題や詳細、次に議論すべき推奨議題を管理・更新します。
-- **OverviewDiagramAgent**: 会議の内容やプロジェクトの構造を視覚的に表現するMermaid.jsの概要図を生成・更新します。
+- **OverviewDiagramAgent**: 論点 (topic) 単位の概要図 (Mermaid.js) を生成・更新します。
+  - 通常: 現在の議題 (currentAgenda.mainTopic) の図を更新 → `target_topic_id` 省略
+  - 特定論点を指す指示 (例: "Xの論点の図を補足") の場合: その topicId を `target_topic_id` に指定
+  - 「全部の図を更新」「全ての論点を最新化」など網羅的指示の場合: `target_topic_id="*"` を指定
 
 応答形式の厳守のお願い:
 応答は必ず以下のJSON形式のリストとしてください。
@@ -890,6 +920,7 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 - `instruction` には、そのエージェントに実行させたい具体的な指示を、簡潔な日本語の文字列で記述してください。
 - 複数のエージェントを呼び出す必要がある場合は、リスト内に複数のオブジェクトを含めてください。
 - 呼び出すべき適切なエージェントが存在しない場合は、空のリスト `[]` を返してください。
+- **OverviewDiagramAgent のみ**: 必要に応じて `"target_topic_id"` フィールドを追加できます (例: `{{"agent_name": "OverviewDiagramAgent", "instruction": "...", "target_topic_id": "topic_xxx"}}`、または `"*"` で全更新)。省略時は現在の論点を更新します。
 
 現在のセッションデータ:
 ```json
@@ -957,6 +988,14 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             logger.info(
                 f"Scheduling agent: {agent_name} with model={agent_model}, instruction: '{instruction}'")
             agent_instructions_map[agent_name] = instruction
+
+            # Issue #131: OverviewDiagramAgent は dispatcher 由来の target_topic_id を kwargs で受け取る
+            extra_kwargs: Dict[str, Any] = {}
+            if agent_name == "OverviewDiagramAgent":
+                target_topic_id = action.get("target_topic_id")
+                if target_topic_id is not None:
+                    extra_kwargs["target_topic_id"] = target_topic_id
+
             task = asyncio.create_task(
                 process_single_agent(
                     agent_instance,
@@ -966,7 +1005,8 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
                     results_from_agents,
                     llm_transcript_messages,
                     model_name=agent_model,
-                    api_key=agent_key
+                    api_key=agent_key,
+                    agent_kwargs=extra_kwargs or None,
                 )
             )
             agent_tasks.append(task)
