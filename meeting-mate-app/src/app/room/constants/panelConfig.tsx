@@ -8,7 +8,7 @@ import CurrentAgendaDisplayPanel from '@/app/room/components/CurrentAgendaDispla
 import SuggestedNextTopicsPanel from '@/app/room/components/SuggestedNextTopicsPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import CalendarLinksPanel from '@/app/room/components/CalendarLinksPanel';
-import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, CalendarLinkItem } from '@/types/data';
+import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramEntry, TranscriptEntry, CalendarLinkItem } from '@/types/data';
 import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
 import { themes } from '@/constants/themes';
 
@@ -38,7 +38,7 @@ export const getPanelConfig = (
   tasks: TodoItem[],
   currentAgenda: CurrentAgenda | null,
   suggestedNextTopics: string[],
-  overviewDiagramData: OverviewDiagramData | null,
+  overviewDiagrams: OverviewDiagramEntry[],
   currentTheme: typeof themes.dark,
   themeType: 'light' | 'dark' | 'modern',
   chatHistory: ChatHistoryItem[],
@@ -69,7 +69,7 @@ export const getPanelConfig = (
   overviewDiagram: {
     title: '会議の概要図',
     icon: Network,
-    content: <OverviewDiagramPanel diagramData={overviewDiagramData} currentTheme={currentTheme} themeType={themeType} diagramRef={diagramRef} />,
+    content: <OverviewDiagramPanel diagrams={overviewDiagrams} mainTopic={currentAgenda?.mainTopic} currentTheme={currentTheme} themeType={themeType} diagramRef={diagramRef} />,
     exportFormats: ['svg', 'png', 'pdf'],
   },
   notes: {

@@ -110,6 +110,8 @@ export default function RoomPage() {
   projectTitle,
   projectSubtitle,
   overviewDiagramData,
+  overviewDiagrams,
+  activeOverviewDiagram,
   pageCurrentUser,
     transcript,
     apiKeyExpiresAt,
@@ -566,8 +568,8 @@ export default function RoomPage() {
   }, []);
 
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, calendarLinks]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagrams, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagrams, selectedTheme, currentTheme, chatHistory, transcript, handleParticipantEnter, handleParticipantLeave, calendarLinks]
   );
 
   // パネルごとのエクスポートオプションを生成
@@ -585,8 +587,9 @@ export default function RoomPage() {
 
     switch (panelId) {
       case 'overviewDiagram': {
-        if (!overviewDiagramData?.mermaidDefinition) return [];
-        const title = overviewDiagramData.title;
+        // Issue #131: active な論点の図をエクスポート対象とする (Step 7 で複数選択 UI 追加予定)
+        if (!activeOverviewDiagram?.mermaidDefinition) return [];
+        const title = activeOverviewDiagram.title;
         return [
           {
             label: 'SVG でダウンロード',
@@ -642,7 +645,7 @@ export default function RoomPage() {
       default:
         return [];
     }
-  }, [overviewDiagramData, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId, calendarLinks]);
+  }, [activeOverviewDiagram, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId, calendarLinks]);
 
   // zoomPanelIdが設定されたらモーダルを表示
   useEffect(() => {
@@ -722,7 +725,7 @@ export default function RoomPage() {
                       tasks={tasks}
                       currentAgenda={currentAgenda}
                       suggestedNextTopics={suggestedNextTopics}
-                      overviewDiagramData={overviewDiagramData}
+                      overviewDiagrams={overviewDiagrams}
                       currentTheme={selectedTheme}
                       themeType={currentTheme}
                       chatHistory={chatHistory}
@@ -800,7 +803,7 @@ export default function RoomPage() {
               tasks={tasks}
               currentAgenda={currentAgenda}
               suggestedNextTopics={suggestedNextTopics}
-              overviewDiagramData={overviewDiagramData}
+              overviewDiagrams={overviewDiagrams}
               currentTheme={selectedTheme}
               themeType={currentTheme}
               chatHistory={chatHistory}
@@ -1150,7 +1153,8 @@ export default function RoomPage() {
             }`}>
               {modalContent.panelId === 'overviewDiagram' ? (
                 <OverviewDiagramPanel
-                  diagramData={overviewDiagramData}
+                  diagrams={overviewDiagrams}
+                  mainTopic={currentAgenda?.mainTopic}
                   currentTheme={selectedTheme}
                   themeType={currentTheme}
                   isFullScreen={true}
@@ -1229,7 +1233,10 @@ export default function RoomPage() {
           notes,
           currentAgenda,
           suggestedNextTopics,
-          overviewDiagram: overviewDiagramData,
+          // Step 7 で全件対応予定。暫定で active な論点の図を従来形式で渡す
+          overviewDiagram: activeOverviewDiagram
+            ? { title: activeOverviewDiagram.title, mermaidDefinition: activeOverviewDiagram.mermaidDefinition }
+            : (overviewDiagramData ?? null),
           calendarLinks,
         } satisfies ReportData}
       />
