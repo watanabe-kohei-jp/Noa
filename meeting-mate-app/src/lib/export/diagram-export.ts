@@ -144,3 +144,32 @@ export async function exportDiagramAsPdf(
   const fileName = `${sanitizeFileName(title || 'overview-diagram')}_${getTimestamp()}.pdf`;
   pdf.save(fileName);
 }
+
+/**
+ * 複数の概要図をまとめて SVG としてダウンロードする (Issue #131)。
+ *
+ * SVG は off-screen で再レンダリングするため、DOM 上に表示されていない論点の
+ * 図もエクスポート可能。PNG/PDF は html2canvas が DOM コンテナを必要とするため
+ * 本関数では対応せず、active な論点のみ既存 API でエクスポートする。
+ *
+ * 各図は連番ファイル名 (NN_title_timestamp.svg) で逐次ダウンロードされる。
+ */
+export async function exportAllDiagramsAsSvg(
+  diagrams: Array<{ title: string; mermaidDefinition: string }>,
+  theme: 'light' | 'dark' | 'modern'
+): Promise<void> {
+  const timestamp = getTimestamp();
+  for (let i = 0; i < diagrams.length; i++) {
+    const d = diagrams[i];
+    if (!d.mermaidDefinition) continue;
+    const svgContent = await renderCleanSvg(d.mermaidDefinition, theme);
+    let svgString = svgContent;
+    if (!svgString.includes('xmlns=')) {
+      svgString = svgString.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+    }
+    const fullSvg = `<?xml version="1.0" encoding="UTF-8"?>\n${svgString}`;
+    const seq = String(i + 1).padStart(2, '0');
+    const fileName = `${seq}_${sanitizeFileName(d.title || 'overview-diagram')}_${timestamp}.svg`;
+    downloadText(fullSvg, fileName, 'image/svg+xml');
+  }
+}
