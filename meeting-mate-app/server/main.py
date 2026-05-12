@@ -719,6 +719,9 @@ async def process_single_agent(
                 "notes": session_data_snapshot.get("notes"),
                 "agenda": session_data_snapshot.get("currentAgenda"),
                 "overviewDiagram": session_data_snapshot.get("overviewDiagram"),
+                # Issue #131: 新スキーマ (論点単位リスト)。OverviewDiagramAgent 内で
+                # normalize_overview_diagrams() を通して正規化する。
+                "overviewDiagrams": session_data_snapshot.get("overviewDiagrams"),
                 "suggestedNextTopics": session_data_snapshot.get("suggestedNextTopics"),
                 "visionContext": session_data_snapshot.get("visionContext"),
             }
