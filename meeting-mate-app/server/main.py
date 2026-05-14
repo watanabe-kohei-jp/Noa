@@ -753,8 +753,10 @@ async def process_single_agent(
                 for key, value in updated_data_from_agent.items():
                     if value is None:
                         continue
-                    # Issue #131: overviewDiagrams は topicId をキーにした per-topic 書き込み
+                    # Issue #131: overviewDiagrams は agent が返した「差分のみ」を
+                    # topicId をキーに per-topic で書き込む (P0 fix: stale overwrite 防止)
                     if key == "overviewDiagrams":
+                        wrote_any = False
                         if isinstance(value, list):
                             for entry in value:
                                 if not isinstance(entry, dict):
@@ -765,15 +767,18 @@ async def process_single_agent(
                                 db.reference(
                                     f"{session_data_path}/overviewDiagrams/{topic_id}"
                                 ).set(entry)
-                            # 新スキーマで書き込み成功 → 旧 overviewDiagram (単数) を削除
-                            try:
-                                db.reference(
-                                    f"{session_data_path}/overviewDiagram"
-                                ).delete()
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to delete legacy overviewDiagram key: {e}"
-                                )
+                                wrote_any = True
+                            # 1 件以上の書き込みが成功した時のみ旧 overviewDiagram (単数) を削除。
+                            # no-op (検証失敗 / closing missing) では legacy を保持する。
+                            if wrote_any:
+                                try:
+                                    db.reference(
+                                        f"{session_data_path}/overviewDiagram"
+                                    ).delete()
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to delete legacy overviewDiagram key: {e}"
+                                    )
                         continue
                     db_key = key
                     if key == "agenda":
@@ -1090,11 +1095,22 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
             agent_instructions_map[agent_name] = instruction
 
             # Issue #131: OverviewDiagramAgent は dispatcher 由来の target_topic_id を kwargs で受け取る
+            # P0 fix: LLM 由来の値は Firebase path injection (/, ., #, [, ], $) を防ぐため
+            # サーバー側で slugify を強制する。"*" のみ wildcard としてそのまま通す。
             extra_kwargs: Dict[str, Any] = {}
             if agent_name == "OverviewDiagramAgent":
-                target_topic_id = action.get("target_topic_id")
-                if target_topic_id is not None:
-                    extra_kwargs["target_topic_id"] = target_topic_id
+                raw_target = action.get("target_topic_id")
+                if raw_target is not None:
+                    if raw_target == "*":
+                        extra_kwargs["target_topic_id"] = "*"
+                    else:
+                        sanitized = slugify_topic_id(str(raw_target))
+                        if sanitized:
+                            extra_kwargs["target_topic_id"] = sanitized
+                        else:
+                            logger.warning(
+                                f"[#131] Discarded invalid target_topic_id from dispatcher: {raw_target!r}"
+                            )
 
             task = asyncio.create_task(
                 process_single_agent(

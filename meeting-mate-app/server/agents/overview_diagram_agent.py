@@ -75,6 +75,10 @@ async def handle_overview_diagram_request(
       - True: 議題遷移 hook からの "締めくくり更新"。対象が無い時は no-op
     """
     diagrams = normalize_overview_diagrams(current_data)
+    # Issue #131 P0 fix: dispatcher が漏らした非正規 ID を二重防御で slugify する
+    if target_topic_id and target_topic_id != "*":
+        sanitized = slugify_topic_id(str(target_topic_id))
+        target_topic_id = sanitized or None
     logger.info(
         f"Overview diagram management: instruction={instruction!r}, "
         f"target_topic_id={target_topic_id!r}, closing_update={closing_update}, "
@@ -84,7 +88,7 @@ async def handle_overview_diagram_request(
     if not model_name or not api_key:
         logger.warning("LLM not configured for overview diagram management.")
         return (
-            {"overviewDiagrams": diagrams},
+            {"overviewDiagrams": []},
             "概要図は更新されませんでした (LLM未設定)。",
         )
 
@@ -124,7 +128,7 @@ async def handle_overview_diagram_request(
 
     if existing is None and closing_update:
         return (
-            {"overviewDiagrams": diagrams},
+            {"overviewDiagrams": []},
             f"closing update 対象 '{topic_id}' が見つからずスキップしました。",
         )
 
@@ -152,7 +156,11 @@ async def _update_single(
     api_key: str,
     closing_update: bool,
 ) -> Tuple[Dict[str, Any], str]:
-    """1 個の topic の概要図を生成/更新する。"""
+    """1 個の topic の概要図を生成/更新する。
+
+    Issue #131 P0 fix: 戻り値は「実際に書き換えた entry だけ」を含む。空配列なら
+    no-op で writer は何も書かない。これにより並列実行時の stale overwrite を防ぐ。
+    """
 
     existing_mermaid = (existing or {}).get("mermaidDefinition") or "graph TD;\n    A[会議開始];"
     topic_title = (existing or {}).get("title") or _derive_title_from_instruction(instruction, topic_id, current_data)
@@ -171,7 +179,7 @@ async def _update_single(
     except Exception as e:
         logger.error(f"Error in _update_single for {topic_id}: {e}", exc_info=True)
         return (
-            {"overviewDiagrams": diagrams},
+            {"overviewDiagrams": []},
             f"概要図 '{topic_title}' の処理中にエラーが発生しました: {e}",
         )
 
@@ -180,7 +188,7 @@ async def _update_single(
             f"[OverviewDiagram] LLM response failed validation for topic_id={topic_id}"
         )
         return (
-            {"overviewDiagrams": diagrams},
+            {"overviewDiagrams": []},
             f"LLM response was not in the expected Mermaid format for topic '{topic_title}'.",
         )
 
@@ -195,13 +203,12 @@ async def _update_single(
         last_updated=now,
     )
 
-    new_list = _upsert(diagrams, updated_entry)
     user_message = _format_user_message(updated_entry, closing_update)
     logger.info(
         f"Saved overview diagram topic_id={topic_id} status={new_status} "
         f"mermaid_len={len(new_mermaid)}"
     )
-    return ({"overviewDiagrams": new_list}, user_message)
+    return ({"overviewDiagrams": [updated_entry]}, user_message)
 
 
 async def _update_many(
@@ -232,20 +239,16 @@ async def _update_many(
         return_exceptions=False,
     )
 
-    # 各 _update_single は独立した new_list (他 topic は stale なまま) を返すので、
-    # 対象 topicId の entry だけを抽出して merge する。
-    merged = list(diagrams)
-    for target, (result_payload, _msg) in zip(targets, results):
-        updated_list = result_payload.get("overviewDiagrams", [])
-        target_entry = next(
-            (e for e in updated_list if e.get("topicId") == target["topicId"]),
-            None,
-        )
-        if target_entry is not None:
-            merged = _upsert(merged, target_entry)
+    # Issue #131 P0 fix: 各 _update_single は差分 (更新された entry 1 件 or 空) を返す。
+    # 全 LLM 呼び出しの差分を平坦化してまとめて返却 → writer は per-topic に書く。
+    updated_entries: List[Dict[str, Any]] = []
+    for _target, (result_payload, _msg) in zip(targets, results):
+        for entry in result_payload.get("overviewDiagrams", []):
+            if isinstance(entry, dict) and entry.get("topicId"):
+                updated_entries.append(entry)
 
-    user_message = f"{len(targets)} 件の概要図を並列更新しました。"
-    return ({"overviewDiagrams": merged}, user_message)
+    user_message = f"{len(updated_entries)}/{len(targets)} 件の概要図を並列更新しました。"
+    return ({"overviewDiagrams": updated_entries}, user_message)
 
 
 async def _llm_generate_mermaid(
@@ -398,21 +401,6 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
             # 例外時は再試行せず外側 _update_single の except に伝播させる
             raise
     return None
-
-
-def _upsert(diagrams: List[Dict[str, Any]], entry: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """topicId をキーに既存 entry を置換、無ければ末尾に追加。"""
-    new_list = []
-    replaced = False
-    for d in diagrams:
-        if d.get("topicId") == entry["topicId"]:
-            new_list.append(entry)
-            replaced = True
-        else:
-            new_list.append(d)
-    if not replaced:
-        new_list.append(entry)
-    return new_list
 
 
 def _derive_title_from_instruction(

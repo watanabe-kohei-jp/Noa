@@ -64,7 +64,8 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagrams[0]["topicId"], LEGACY_TOPIC_ID)
         self.assertEqual(diagrams[0]["mermaidDefinition"], cleaned_output)
 
-    async def test_falls_back_to_existing_when_all_retries_fail(self):
+    async def test_falls_back_to_empty_diff_when_all_retries_fail(self):
+        """P0 fix: validation 失敗時は差分なし (空リスト) を返し、writer は何も書かない。"""
         current_data = {
             "overviewDiagram": {
                 "mermaidDefinition": "graph TD\nA[Existing]",
@@ -89,10 +90,8 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(mock_llm.await_count, 2)
-        diagrams = result["overviewDiagrams"]
-        self.assertEqual(len(diagrams), 1)
-        # legacy entry がそのまま残る
-        self.assertEqual(diagrams[0]["mermaidDefinition"], "graph TD\nA[Existing]")
+        # 差分なし → writer は何も書かない (旧 entry は DB 上で生き残る)
+        self.assertEqual(result["overviewDiagrams"], [])
         self.assertIn("expected Mermaid format", message)
 
     async def test_succeeds_on_retry(self):
@@ -126,6 +125,7 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagrams[0]["mermaidDefinition"], cleaned)
 
     async def test_no_retry_on_exception(self):
+        """P0 fix: LLM 例外時も差分なし (空リスト)。writer は旧 entry に触らない。"""
         current_data = {
             "overviewDiagram": {
                 "mermaidDefinition": "graph TD\nA[Existing]",
@@ -146,14 +146,13 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         mock_llm.assert_awaited_once()
-        diagrams = result["overviewDiagrams"]
-        # 例外時は legacy entry が変更されず残る
-        self.assertEqual(diagrams[0]["mermaidDefinition"], "graph TD\nA[Existing]")
+        self.assertEqual(result["overviewDiagrams"], [])
         self.assertIn("エラー", message)
 
     # ---- 新規テスト ----
 
     async def test_target_topic_id_routes_to_specific_entry(self):
+        """P0 fix: 差分 semantics — 指定 topicId の差分のみを返し、他 topic は payload に含めない。"""
         current_data = {
             "overviewDiagrams": [
                 _entry("topic_a", "graph TD\nA"),
@@ -179,10 +178,10 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
                 target_topic_id="topic_a",
             )
         diagrams = result["overviewDiagrams"]
-        self.assertEqual(len(diagrams), 2)
-        by_id = {d["topicId"]: d for d in diagrams}
-        self.assertEqual(by_id["topic_a"]["mermaidDefinition"], cleaned)
-        self.assertEqual(by_id["topic_b"]["mermaidDefinition"], "graph TD\nB")
+        # 差分のみ → topic_a 1 件
+        self.assertEqual(len(diagrams), 1)
+        self.assertEqual(diagrams[0]["topicId"], "topic_a")
+        self.assertEqual(diagrams[0]["mermaidDefinition"], cleaned)
 
     async def test_wildcard_updates_all_topics_in_parallel(self):
         current_data = {
@@ -239,6 +238,7 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_llm.await_count, overview_diagram_agent.WILDCARD_CAP)
 
     async def test_create_new_entry_when_topic_missing(self):
+        """P0 fix: 新規 entry も差分のみ返却 (topic_x 1 件)。topic_a は payload に含めない。"""
         current_data = {"overviewDiagrams": [_entry("topic_a", "graph TD\nA")]}
         with patch.object(
             overview_diagram_agent,
@@ -257,10 +257,10 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
                 api_key="test-key",
                 target_topic_id="topic_x",
             )
-        ids = [d["topicId"] for d in result["overviewDiagrams"]]
-        self.assertIn("topic_a", ids)
-        self.assertIn("topic_x", ids)
-        self.assertEqual(len(ids), 2)
+        diagrams = result["overviewDiagrams"]
+        self.assertEqual(len(diagrams), 1)
+        self.assertEqual(diagrams[0]["topicId"], "topic_x")
+        self.assertEqual(diagrams[0]["mermaidDefinition"], "graph TD\nnew")
 
     async def test_closing_update_skips_when_topic_missing(self):
         current_data = {"overviewDiagrams": [_entry("topic_a", "graph TD\nA")]}
@@ -283,8 +283,8 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
                 closing_update=True,
             )
         mock_llm.assert_not_awaited()
-        # 変更なし
-        self.assertEqual(result["overviewDiagrams"], current_data["overviewDiagrams"])
+        # P0 fix: no-op → 差分なし (空リスト)
+        self.assertEqual(result["overviewDiagrams"], [])
         self.assertIn("スキップ", msg)
 
     async def test_closing_update_marks_status_closed(self):
@@ -310,6 +310,35 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
         entry = result["overviewDiagrams"][0]
         self.assertEqual(entry["status"], "closed")
         self.assertEqual(entry["mermaidDefinition"], "graph TD\nfinal")
+
+    async def test_target_topic_id_sanitized_by_agent_defense(self):
+        """P0 fix: dispatcher が validation を漏らした場合でも agent 内で slugify される
+        (Firebase path injection / nested path 化を防ぐ二重防御)。"""
+        current_data = {"overviewDiagrams": []}
+        with patch.object(
+            overview_diagram_agent,
+            "llm_complete",
+            AsyncMock(return_value="x"),
+        ), patch.object(
+            overview_diagram_agent,
+            "validate_and_clean_mermaid",
+            return_value="graph TD\nok",
+        ):
+            result, _ = await overview_diagram_agent.handle_overview_diagram_request(
+                instruction="injection 試行",
+                conversation_history=[],
+                current_data=current_data,
+                model_name="gemini-2.5-flash",
+                api_key="test-key",
+                target_topic_id="path/with#bad$chars",
+            )
+        # 危険な path セパレータが '_' に置換されて safe な topicId になっている
+        self.assertEqual(len(result["overviewDiagrams"]), 1)
+        topic_id = result["overviewDiagrams"][0]["topicId"]
+        self.assertNotIn("/", topic_id)
+        self.assertNotIn("#", topic_id)
+        self.assertNotIn("$", topic_id)
+        self.assertEqual(topic_id, "path_with_bad_chars")
 
     async def test_default_uses_main_topic_slug(self):
         current_data = {
