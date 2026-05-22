@@ -313,7 +313,8 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_target_topic_id_sanitized_by_agent_defense(self):
         """P0 fix: dispatcher が validation を漏らした場合でも agent 内で slugify される
-        (Firebase path injection / nested path 化を防ぐ二重防御)。"""
+        (Firebase path injection / nested path 化を防ぐ二重防御)。
+        P1 fix #6: slugify は末尾に hash suffix を付ける。"""
         current_data = {"overviewDiagrams": []}
         with patch.object(
             overview_diagram_agent,
@@ -338,7 +339,8 @@ class OverviewDiagramAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/", topic_id)
         self.assertNotIn("#", topic_id)
         self.assertNotIn("$", topic_id)
-        self.assertEqual(topic_id, "path_with_bad_chars")
+        # body 部分は記号が '_' 化、末尾は 6 桁 hash
+        self.assertRegex(topic_id, r"^path_with_bad_chars_[0-9a-f]{6}$")
 
     async def test_default_uses_main_topic_slug(self):
         current_data = {

@@ -14,7 +14,7 @@ from media_api import router as media_router
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
-from agents.overview_diagram_utils import slugify_topic_id
+from agents.overview_diagram_utils import sanitize_target_topic_id, slugify_topic_id
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
 from firebase_admin import credentials, auth as firebase_auth, db
@@ -225,7 +225,10 @@ class AgentResult(BaseModel):
     updatedTasks: Optional[List[Dict[str, Any]]] = None
     updatedNotes: Optional[List[Dict[str, Any]]] = None
     updatedAgenda: Optional[Dict[str, Any]] = None
+    # Issue #131: 旧 1 件互換 (active な topic 1 件を抜粋)
     updatedOverviewDiagram: Optional[Dict[str, Any]] = None
+    # Issue #131: 新スキーマ — 論点単位のリスト
+    updatedOverviewDiagrams: Optional[List[Dict[str, Any]]] = None
 
 
 class JsonRpcResponse(BaseModel):
@@ -799,6 +802,13 @@ async def process_single_agent(
         results_dict[agent_name] = {"error": str(e)}
 
 
+# Issue #131 P1 fix #4: 議題遷移の closing update は同じ (session, topic) で同時に
+# 複数走らないようにする。dispatcher 由来の hook が短時間に複数発火しても DB の
+# stale overwrite や LLM コストの重複を防ぐ。
+_closing_update_in_flight: set[Tuple[str, str]] = set()
+_closing_update_lock = asyncio.Lock()
+
+
 async def _trigger_overview_closing_update(
     task_payload: TaskPayload,
     old_main_topic: str,
@@ -809,8 +819,20 @@ async def _trigger_overview_closing_update(
 
     process_single_agent を再利用してデータ取得・LLM 呼び出し・Firebase 書き込み
     までを一貫して行う。失敗時は warning ログだけ残して落ちる (本流の応答には影響しない)。
+    同一 (session, topic) の重複起動は in-flight set でスキップする。
     """
     topic_id_slug = slugify_topic_id(old_main_topic) or old_main_topic
+    session_key = task_payload.sessionId or "_global"
+    inflight_key = (session_key, topic_id_slug)
+
+    async with _closing_update_lock:
+        if inflight_key in _closing_update_in_flight:
+            logger.info(
+                f"[#131] Skipping duplicate closing update: session={session_key} topic={topic_id_slug}"
+            )
+            return
+        _closing_update_in_flight.add(inflight_key)
+
     instruction = (
         f"議題が新しいトピックへ移行しました。これまで議論されていた論点 "
         f"'{old_main_topic}' の概要図を、議論の最終形としてまとめてください。"
@@ -839,6 +861,9 @@ async def _trigger_overview_closing_update(
             f"[#131] Closing update failed for topic='{old_main_topic}': {e}",
             exc_info=True,
         )
+    finally:
+        async with _closing_update_lock:
+            _closing_update_in_flight.discard(inflight_key)
 
 
 def detect_agenda_topic_change(
@@ -1096,21 +1121,19 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 
             # Issue #131: OverviewDiagramAgent は dispatcher 由来の target_topic_id を kwargs で受け取る
             # P0 fix: LLM 由来の値は Firebase path injection (/, ., #, [, ], $) を防ぐため
-            # サーバー側で slugify を強制する。"*" のみ wildcard としてそのまま通す。
+            # サーバー側で sanitize_target_topic_id を通す ("*" / safe ID はそのまま、
+            # unsafe なら slugify。P1 fix #6 で round-trip 性を保つ)。
             extra_kwargs: Dict[str, Any] = {}
             if agent_name == "OverviewDiagramAgent":
                 raw_target = action.get("target_topic_id")
                 if raw_target is not None:
-                    if raw_target == "*":
-                        extra_kwargs["target_topic_id"] = "*"
+                    sanitized = sanitize_target_topic_id(raw_target)
+                    if sanitized:
+                        extra_kwargs["target_topic_id"] = sanitized
                     else:
-                        sanitized = slugify_topic_id(str(raw_target))
-                        if sanitized:
-                            extra_kwargs["target_topic_id"] = sanitized
-                        else:
-                            logger.warning(
-                                f"[#131] Discarded invalid target_topic_id from dispatcher: {raw_target!r}"
-                            )
+                        logger.warning(
+                            f"[#131] Discarded invalid target_topic_id from dispatcher: {raw_target!r}"
+                        )
 
             task = asyncio.create_task(
                 process_single_agent(
@@ -1185,6 +1208,25 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
     session_data_after = db.reference(session_data_path).get() or {}
     participants_after = db.reference(f"{room_ref_path}/participants").get() or {}
 
+    # Issue #131: 新スキーマ overviewDiagrams を整形 + 旧 1 件互換用に active 1 件抜粋
+    od_diagrams_normalized: Optional[List[Dict[str, Any]]] = None
+    od_legacy_compat: Optional[Dict[str, Any]] = session_data_after.get("overviewDiagram")
+    raw_od = session_data_after.get("overviewDiagrams")
+    if isinstance(raw_od, dict):
+        items = [v for v in raw_od.values() if isinstance(v, dict)]
+        items.sort(key=lambda e: e.get("createdAt", ""))
+        od_diagrams_normalized = items
+    elif isinstance(raw_od, list):
+        od_diagrams_normalized = [d for d in raw_od if isinstance(d, dict)]
+    if od_diagrams_normalized and not od_legacy_compat:
+        # 旧形式互換: active 優先、無ければ末尾の 1 件を title+mermaidDefinition 形式に変換
+        active_entries = [d for d in od_diagrams_normalized if d.get("status") != "closed"]
+        pick = active_entries[-1] if active_entries else od_diagrams_normalized[-1]
+        od_legacy_compat = {
+            "title": pick.get("title", "概要図"),
+            "mermaidDefinition": pick.get("mermaidDefinition", ""),
+        }
+
     final_result = AgentResult(
         invokedAgents=active_agent_names,
         updatedParticipants=list(participants_after.values()) if participants_after else None,
@@ -1193,7 +1235,8 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
         updatedNotes=list(session_data_after.get(
             "notes", {}).values()) if session_data_after.get("notes") else None,
         updatedAgenda=session_data_after.get("currentAgenda"),
-        updatedOverviewDiagram=session_data_after.get("overviewDiagram")
+        updatedOverviewDiagram=od_legacy_compat,
+        updatedOverviewDiagrams=od_diagrams_normalized,
     )
     return final_result
 

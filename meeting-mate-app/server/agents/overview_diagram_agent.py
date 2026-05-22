@@ -18,6 +18,7 @@ from agents.overview_diagram_utils import (
     GENERAL_TOPIC_ID,
     make_entry,
     normalize_overview_diagrams,
+    sanitize_target_topic_id,
     slugify_topic_id,
 )
 
@@ -75,10 +76,9 @@ async def handle_overview_diagram_request(
       - True: 議題遷移 hook からの "締めくくり更新"。対象が無い時は no-op
     """
     diagrams = normalize_overview_diagrams(current_data)
-    # Issue #131 P0 fix: dispatcher が漏らした非正規 ID を二重防御で slugify する
-    if target_topic_id and target_topic_id != "*":
-        sanitized = slugify_topic_id(str(target_topic_id))
-        target_topic_id = sanitized or None
+    # Issue #131 P0 fix: dispatcher が漏らした非正規 ID を二重防御で sanitize する。
+    # P1 fix #6: safe な ID はそのまま通し round-trip を保つ。
+    target_topic_id = sanitize_target_topic_id(target_topic_id)
     logger.info(
         f"Overview diagram management: instruction={instruction!r}, "
         f"target_topic_id={target_topic_id!r}, closing_update={closing_update}, "
