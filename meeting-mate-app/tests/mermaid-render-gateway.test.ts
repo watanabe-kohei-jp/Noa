@@ -83,7 +83,6 @@ function installDom(opts: InstallDomOpts = {}) {
     },
   };
 
-  // @ts-expect-error stub
   globalThis.document = {
     documentElement: root,
     styleSheets: { length: 1, 0: sheet } as unknown as StyleSheetList,
@@ -93,7 +92,7 @@ function installDom(opts: InstallDomOpts = {}) {
       }
       return { style: createStyleDecl() };
     },
-  };
+  } as unknown as Document;
   // @ts-expect-error stub
   globalThis.getComputedStyle = (el: unknown) => {
     if (el === root) return rootComputed;
@@ -167,12 +166,11 @@ describe('render-gateway: normalizeToSupportedColor (canvas 正規化)', () => {
 
   it('falls back to #000000 when canvas 2d context is unavailable', async () => {
     // canvas.getContext が null を返すケース
-    // @ts-expect-error stub
     globalThis.document = {
       documentElement: { style: createStyleDecl() },
       styleSheets: { length: 0 },
       createElement: () => ({ getContext: () => null }),
-    };
+    } as unknown as Document;
     // @ts-expect-error stub
     globalThis.getComputedStyle = () => createStyleDecl();
     const { __testing } = await loadFreshGateway();

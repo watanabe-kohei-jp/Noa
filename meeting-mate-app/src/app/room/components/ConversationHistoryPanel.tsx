@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { participantColors, getParticipantColorIndex } from './ParticipantsList';
+import type { SpeakerMap } from '@/types/data';
 
 interface ChatHistoryItem {
   id: number;
@@ -8,17 +9,21 @@ interface ChatHistoryItem {
   message: string;
   timestamp: string;
   type: 'chat' | 'system';
-  userId?: string; // ユーザーIDを追加
+  userId?: string;
+  speakerId?: string;
+  speakerLabel?: string;
 }
 
 interface ConversationHistoryPanelProps {
   chatHistory: ChatHistoryItem[];
   currentTheme: typeof import('@/constants/themes').themes.dark;
+  speakerMap: SpeakerMap;
 }
 
-const ConversationHistoryPanel: React.FC<ConversationHistoryPanelProps> = ({ 
-  chatHistory, 
-  currentTheme 
+const ConversationHistoryPanel: React.FC<ConversationHistoryPanelProps> = ({
+  chatHistory,
+  currentTheme,
+  speakerMap,
 }) => {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -44,23 +49,32 @@ const ConversationHistoryPanel: React.FC<ConversationHistoryPanelProps> = ({
   return (
     <div ref={chatContainerRef} className="h-48 overflow-y-auto space-y-4">
       {chatHistory.map((chat) => {
-        // システムメッセージはグレー、ユーザーメッセージは参加者パネルと同じ色のグラデーション
-        const bgColor = chat.type === 'system' 
-          ? 'bg-gray-500' 
+        // 話者分離 (speaker_N) のみ speakerMap を適用。AI/agent 系は従来表示
+        const isHumanStt = chat.type !== 'system' && !!chat.speakerId?.startsWith('speaker_');
+        const mapEntry = isHumanStt ? speakerMap[chat.speakerId!] : undefined;
+
+        const displayName = mapEntry?.label ?? chat.speakerLabel ?? chat.user;
+        const avatarText = Array.from(displayName).slice(0, 2).join('');
+
+        const fallbackBg = chat.type === 'system'
+          ? 'bg-gray-500'
           : `bg-gradient-to-r ${participantColors[getParticipantColorIndex(chat.userId || chat.user)]}`;
-        
+
+        const avatarClass = `w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-white font-semibold text-xs${mapEntry ? '' : ` ${fallbackBg}`}`;
+        const avatarStyle = mapEntry ? { background: mapEntry.color } : undefined;
+
         return (
           <div key={chat.id} className="flex items-start space-x-3 text-sm">
-            <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-white font-semibold text-xs ${bgColor}`}>
-              {chat.avatar}
+            <div className={avatarClass} style={avatarStyle}>
+              {avatarText}
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center space-x-2 mb-1">
-                <span className={`font-medium ${currentTheme.text.primary}`}>{chat.user}</span>
+                <span className={`font-medium ${currentTheme.text.primary}`}>{displayName}</span>
                 <span className={`text-xs ${currentTheme.text.tertiary}`}>
-                  {new Date(chat.timestamp).toLocaleTimeString('ja-JP', { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
+                  {new Date(chat.timestamp).toLocaleTimeString('ja-JP', {
+                    hour: '2-digit',
+                    minute: '2-digit'
                   })}
                 </span>
               </div>

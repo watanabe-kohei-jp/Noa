@@ -3,13 +3,8 @@ import type { NextConfig } from "next";
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8001';
 
 const nextConfig: NextConfig = {
-  // dev rewrite proxy のタイムアウト延長 (Issue #124)
-  // Next.js 15.x のデフォルトは 30秒。/invoke は LLM Orchestrator + 複数 Agent の
-  // 直列実行で 30-40秒かかるケースがあり、デフォルトでは ECONNRESET (socket hang up)
-  // が発生してフロントに 500 が表示される。dev のみの設定で本番には影響しない。
-  experimental: {
-    proxyTimeout: 90_000,
-  },
+  // Issue #129 完了後: /invoke は ~200ms で 202 を返すため proxyTimeout 延長は不要。
+  // デフォルト (30s) に戻し、長時間 API のフェイルファストを優先。
   // 本番ビルド時のみ静的エクスポートを有効にする
   ...(process.env.NODE_ENV === 'production' && process.env.NEXT_EXPORT === 'true' ? {
     output: 'export',

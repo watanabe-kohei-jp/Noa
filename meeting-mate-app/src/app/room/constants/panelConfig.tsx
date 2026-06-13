@@ -8,7 +8,7 @@ import CurrentAgendaDisplayPanel from '@/app/room/components/CurrentAgendaDispla
 import SuggestedNextTopicsPanel from '@/app/room/components/SuggestedNextTopicsPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import CalendarLinksPanel from '@/app/room/components/CalendarLinksPanel';
-import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramEntry, TranscriptEntry, CalendarLinkItem } from '@/types/data';
+import { PanelId, ParticipantEntry, Notes, TodoItem, CurrentAgenda, OverviewDiagramEntry, TranscriptEntry, CalendarLinkItem, SpeakerMap } from '@/types/data';
 import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
 import { themes } from '@/constants/themes';
 
@@ -30,6 +30,9 @@ interface ChatHistoryItem {
   message: string;
   timestamp: string;
   type: 'chat' | 'system';
+  userId?: string;
+  speakerId?: string;
+  speakerLabel?: string;
 }
 
 export const getPanelConfig = (
@@ -43,6 +46,7 @@ export const getPanelConfig = (
   themeType: 'light' | 'dark' | 'modern',
   chatHistory: ChatHistoryItem[],
   transcripts: TranscriptEntry[],
+  speakerMap: SpeakerMap,
   onParticipantEnter: (id: string) => void,
   onParticipantLeave: (id: string) => void,
   diagramRef?: React.RefObject<MermaidDiagramHandle | null>,
@@ -87,7 +91,7 @@ export const getPanelConfig = (
   conversationHistory: {
     title: '会話履歴',
     icon: MessageSquare,
-    content: <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={currentTheme} />,
+    content: <ConversationHistoryPanel chatHistory={chatHistory} currentTheme={currentTheme} speakerMap={speakerMap} />,
     exportFormats: ['markdown', 'json'],
   },
   calendarLinks: {

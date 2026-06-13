@@ -25,7 +25,8 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Literal
+from uuid import uuid4
 from dotenv import load_dotenv
 import logging
 import time
@@ -46,6 +47,171 @@ def _get_processing_lock(session_data_path: str) -> asyncio.Lock:
     if session_data_path not in _llm_processing_locks:
         _llm_processing_locks[session_data_path] = asyncio.Lock()
     return _llm_processing_locks[session_data_path]
+
+
+def iso_now() -> str:
+    """ISO8601 形式の現在時刻 (UTC、Z 付き) を返す。プロジェクト全体で統一フォーマット。"""
+    return datetime.utcnow().isoformat() + "Z"
+
+
+# Issue #129: AI トリガーすべき transcript エントリの判定 (ループ防止)
+_TRIGGERABLE_ORIGINS = {"human_chat", "human_stt"}
+
+
+def _is_triggerable_transcript_entry(entry: dict) -> bool:
+    """transcript エントリが LLM トリガー対象かを判定する。
+
+    origin allowlist でフィルタ。後方互換として origin 未設定のエントリは
+    role/source から推定する。
+    """
+    origin = entry.get("origin")
+    if origin:
+        return origin in _TRIGGERABLE_ORIGINS
+    if entry.get("role") == "ai":
+        return False
+    source = entry.get("source")
+    if source in ("stt", "manual"):
+        return True
+    if source == "live-api" and entry.get("role") == "user":
+        return True
+    return entry.get("role") != "ai"
+
+
+def _count_triggerable_messages(db_transcript_entries: List[Dict[str, Any]]) -> int:
+    """transcript からトリガー対象メッセージ数を集計する"""
+    return sum(1 for e in db_transcript_entries if _is_triggerable_transcript_entry(e))
+
+
+# Issue #129: job レコードのライフサイクル管理
+JOBS_PURGE_DEFAULT_AGE_SECONDS = 1800  # 30 分。タブ復帰や遅延完了の観測時間として妥当
+
+
+def _parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """ISO 文字列を datetime に変換。失敗時は None を返す。"""
+    if not value:
+        return None
+    try:
+        # iso_now() で書いた値は末尾 "Z" 付き。fromisoformat は Z を扱えないため除去。
+        cleaned = value.rstrip("Z")
+        return datetime.fromisoformat(cleaned)
+    except (ValueError, TypeError):
+        return None
+
+
+def _purge_old_jobs(room_id: str, max_age_seconds: int = JOBS_PURGE_DEFAULT_AGE_SECONDS) -> int:
+    """terminal status (done / error) の古い job を削除する。
+
+    running / queued は決して削除しない (実進行中の可能性があるため)。
+    クラッシュで stale になった running / queued は startup の _recover_stale_jobs で復旧する。
+
+    Returns: 削除した job 数
+    """
+    try:
+        jobs = db.reference(f"rooms/{room_id}/jobs").get() or {}
+    except Exception as e:
+        logger.warning(f"[_purge_old_jobs] Failed to read jobs for room {room_id}: {e}")
+        return 0
+
+    if not isinstance(jobs, dict):
+        return 0
+
+    threshold = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+    deleted = 0
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") not in ("done", "error"):
+            continue
+        completed_at = _parse_iso_timestamp(job.get("completedAt"))
+        if completed_at is None or completed_at >= threshold:
+            continue
+        try:
+            db.reference(f"rooms/{room_id}/jobs/{job_id}").delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"[_purge_old_jobs] Failed to delete job {job_id}: {e}")
+    if deleted:
+        logger.info(f"[_purge_old_jobs] room={room_id} deleted={deleted}")
+    return deleted
+
+
+def _purge_room_jobs(room_id: str) -> None:
+    """room 配下の全 job を削除する (room 自体の削除など全消し用)"""
+    try:
+        db.reference(f"rooms/{room_id}/jobs").delete()
+        logger.info(f"[_purge_room_jobs] room={room_id} jobs deleted")
+    except Exception as e:
+        logger.warning(f"[_purge_room_jobs] Failed for room {room_id}: {e}")
+
+
+def _purge_session_jobs(room_id: str, session_id: str) -> int:
+    """指定セッションに紐づく job のみを削除する (セッション削除時に使用)"""
+    try:
+        jobs = db.reference(f"rooms/{room_id}/jobs").get() or {}
+    except Exception as e:
+        logger.warning(f"[_purge_session_jobs] read failed for room {room_id}: {e}")
+        return 0
+    if not isinstance(jobs, dict):
+        return 0
+    deleted = 0
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        if job.get("sessionId") != session_id:
+            continue
+        try:
+            db.reference(f"rooms/{room_id}/jobs/{job_id}").delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"[_purge_session_jobs] delete failed for {job_id}: {e}")
+    if deleted:
+        logger.info(
+            f"[_purge_session_jobs] room={room_id} session={session_id} deleted={deleted}")
+    return deleted
+
+
+def _recover_stale_jobs() -> int:
+    """startup 時に running / queued な job を error に格上げする。
+
+    FastAPI BackgroundTasks は durable queue ではないため、プロセス終了/deploy/crash で
+    job 実行が中断されるが RTDB には running/queued が残る。フロントが永久ロード状態に
+    陥らないよう、起動時に格上げする。
+
+    Returns: 格上げした job 数
+    """
+    try:
+        rooms = db.reference("rooms").get() or {}
+    except Exception as e:
+        logger.warning(f"[_recover_stale_jobs] Failed to read rooms: {e}")
+        return 0
+
+    if not isinstance(rooms, dict):
+        return 0
+
+    recovered = 0
+    for room_id, room_data in rooms.items():
+        if not isinstance(room_data, dict):
+            continue
+        jobs = room_data.get("jobs", {}) or {}
+        if not isinstance(jobs, dict):
+            continue
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            if job.get("status") not in ("queued", "running"):
+                continue
+            try:
+                db.reference(f"rooms/{room_id}/jobs/{job_id}").update({
+                    "status": "error",
+                    "error": {"code": -32001, "message": "stale_after_restart"},
+                    "completedAt": iso_now(),
+                })
+                recovered += 1
+            except Exception as e:
+                logger.warning(f"[_recover_stale_jobs] Failed to update {room_id}/{job_id}: {e}")
+    if recovered:
+        logger.info(f"[_recover_stale_jobs] recovered={recovered} jobs")
+    return recovered
 
 load_dotenv()
 
@@ -99,6 +265,20 @@ ALLOWED_ORIGINS = os.environ.get(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.on_event("startup")
+async def _on_startup_recover_jobs():
+    """Issue #129: プロセス起動時に running/queued な job を error に格上げする。
+
+    BackgroundTasks は durable queue ではないため、deploy/crash で job 実行が中断されると
+    RTDB に running/queued が残りフロントが永久ロード状態になる。これを防ぐ復旧フック。
+    """
+    try:
+        recovered = _recover_stale_jobs()
+        logger.info(f"[startup] stale job recovery: {recovered} job(s) marked error")
+    except Exception as e:
+        logger.warning(f"[startup] stale job recovery failed: {e}")
 
 
 @app.middleware("http")
@@ -233,9 +413,37 @@ class AgentResult(BaseModel):
 
 class JsonRpcResponse(BaseModel):
     jsonrpc: str = "2.0"
-    result: Optional[AgentResult] = None
+    # Issue #129: /invoke が 202 を返す場合は JobAcceptedResult、デモルーム同期パスは AgentResult。
+    # Pydantic v2 は Any でも model 入れ子のシリアライズは透過に処理する。
+    result: Optional[Any] = None
     error: Optional[Dict[str, Any]] = None
     id: str
+
+
+class JobAcceptedResult(BaseModel):
+    """Issue #129: /invoke 202 レスポンスの result"""
+    jobId: str
+    status: Literal["queued"] = "queued"
+
+
+class JobAgentStatus(BaseModel):
+    status: Literal["pending", "running", "done", "error"] = "pending"
+    error: Optional[str] = None
+
+
+class JobRecord(BaseModel):
+    """Issue #129: rooms/{roomId}/jobs/{jobId} に書き込むコントロールプレーンレコード"""
+    jobId: str
+    sessionId: Optional[str] = None
+    speakerId: Optional[str] = None
+    requestId: Optional[str] = None
+    status: Literal["queued", "running", "done", "error"]
+    createdAt: str
+    startedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+    invokedAgents: List[str] = []
+    agents: Dict[str, JobAgentStatus] = {}
+    error: Optional[Dict[str, Any]] = None
 
 
 class JoinRoomRequest(BaseModel):
@@ -597,6 +805,12 @@ async def delete_session_endpoint(room_id: str, session_id: str):
     if current_id == session_id:
         current_ref.set(None)
 
+    # Issue #129: 削除セッションに紐づく invoke job を purge (孤児防止)
+    try:
+        _purge_session_jobs(room_id, session_id)
+    except Exception as e:
+        logger.warning(f"Failed to purge session jobs for {session_id}: {e}")
+
     return {"status": "deleted", "message": "セッションを削除しました"}
 
 
@@ -923,7 +1137,22 @@ def _schedule_overview_closing_update_if_agenda_changed(
     )
 
 
-async def orchestrate_agents(task_payload: TaskPayload, background_tasks: BackgroundTasks, db_transcript_entries: List[Dict[str, Any]], llm_api_key: Optional[str] = None, session_data: Optional[Dict[str, Any]] = None, room_data: Optional[Dict[str, Any]] = None):
+async def orchestrate_agents(
+    task_payload: TaskPayload,
+    background_tasks: BackgroundTasks,
+    db_transcript_entries: List[Dict[str, Any]],
+    llm_api_key: Optional[str] = None,
+    session_data: Optional[Dict[str, Any]] = None,
+    room_data: Optional[Dict[str, Any]] = None,
+    job_id: Optional[str] = None,
+    room_id_for_job: Optional[str] = None,
+):
+    """エージェント群の振り分けと並列実行を行う。
+
+    Issue #129: job_id + room_id_for_job が指定された場合、各エージェントの実行前後に
+    rooms/{room_id_for_job}/jobs/{job_id}/agents/{agentName}.status を更新する。
+    この引数が None の場合は従来挙動 (vision pipeline 等の後方互換)。
+    """
     logger.info(
         f"Orchestrating agents for task: {task_payload.taskId}, room: {task_payload.roomId}")
 
@@ -1092,6 +1321,34 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
     active_agent_names = []
     agent_instructions_map = {}
 
+    # Issue #129: per-agent 進捗を jobs/{jobId}/agents/{name} に書き込むヘルパー
+    job_progress_enabled = bool(job_id and room_id_for_job)
+
+    def _write_agent_status(agent_name: str, status: str, error_msg: Optional[str] = None) -> None:
+        if not job_progress_enabled:
+            return
+        try:
+            update = {"status": status}
+            if error_msg is not None:
+                update["error"] = str(error_msg)[:200]
+            db.reference(
+                f"rooms/{room_id_for_job}/jobs/{job_id}/agents/{agent_name}"
+            ).update(update)
+        except Exception as progress_err:
+            logger.warning(
+                f"[orchestrate job={job_id}] Failed to write agent status "
+                f"{agent_name}={status}: {progress_err}"
+            )
+
+    async def _run_agent_with_progress(agent_name: str, agent_coro):
+        _write_agent_status(agent_name, "running")
+        await agent_coro
+        agent_result = results_from_agents.get(agent_name, {})
+        if isinstance(agent_result, dict) and "error" in agent_result:
+            _write_agent_status(agent_name, "error", agent_result.get("error"))
+        else:
+            _write_agent_status(agent_name, "done")
+
     agent_tasks = []
 
     for action in dispatch_actions:
@@ -1135,18 +1392,20 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
                             f"[#131] Discarded invalid target_topic_id from dispatcher: {raw_target!r}"
                         )
 
+            inner_coro = process_single_agent(
+                agent_instance,
+                task_payload,
+                agent_name,
+                instruction,
+                results_from_agents,
+                llm_transcript_messages,
+                model_name=agent_model,
+                api_key=agent_key,
+                agent_kwargs=extra_kwargs or None,
+            )
             task = asyncio.create_task(
-                process_single_agent(
-                    agent_instance,
-                    task_payload,
-                    agent_name,
-                    instruction,
-                    results_from_agents,
-                    llm_transcript_messages,
-                    model_name=agent_model,
-                    api_key=agent_key,
-                    agent_kwargs=extra_kwargs or None,
-                )
+                _run_agent_with_progress(agent_name, inner_coro)
+                if job_progress_enabled else inner_coro
             )
             agent_tasks.append(task)
             active_agent_names.append(agent_name)
@@ -1242,11 +1501,136 @@ async def orchestrate_agents(task_payload: TaskPayload, background_tasks: Backgr
 
 
 # ================================================================
-# /invoke endpoint
+# /invoke endpoint  (Issue #129: 202 Accepted + RTDB job 購読パターン)
 # ================================================================
+
+
+async def _run_invoke_job(
+    room_id: str,
+    session_id: Optional[str],
+    job_id: str,
+    request_id: str,
+    task_payload: TaskPayload,
+):
+    """Issue #129: Orchestrator + Agents をバックグラウンドで実行する。
+
+    - asyncio.Lock で同一セッションの /invoke 呼び出しを直列化 (キュー化)
+    - vision pipeline の `if lock.locked(): skip` セマンティクスは温存される
+      (vision はロック外で skip 判定するため、ここで queue 待ちしても影響しない)
+    - jobs/{jobId} の status を queued → running → done/error と遷移させる
+    - 完了後に terminal status の古い job を purge
+    """
+    session_data_path = get_session_data_path(room_id, session_id)
+    session_ref = db.reference(session_data_path)
+    job_ref = db.reference(f"rooms/{room_id}/jobs/{job_id}")
+    lock = _get_processing_lock(session_data_path)
+
+    try:
+        async with lock:
+            try:
+                job_ref.update({"status": "running", "startedAt": iso_now()})
+            except Exception as mark_err:
+                logger.warning(
+                    f"[{room_id} job={job_id}] Failed to mark running: {mark_err}")
+
+            session_data = session_ref.get() or {}
+
+            raw_transcript = session_data.get("transcript", {})
+            if isinstance(raw_transcript, dict):
+                db_transcript_entries = list(raw_transcript.values())
+            elif isinstance(raw_transcript, list):
+                db_transcript_entries = raw_transcript
+            else:
+                db_transcript_entries = []
+
+            current_user_message_count = _count_triggerable_messages(db_transcript_entries)
+            last_processed_count = session_data.get("last_llm_processed_message_count", 0)
+
+            if last_processed_count > current_user_message_count:
+                last_processed_count = 0
+                session_ref.child("last_llm_processed_message_count").set(0)
+                logger.warning(
+                    f"[{room_id}] Reset last_llm_processed_message_count to 0.")
+
+            logger.info(
+                f"[{room_id} job={job_id}] Current user messages: {current_user_message_count}, "
+                f"Last processed: {last_processed_count}, Trigger: {LLM_TRIGGER_MESSAGE_COUNT}"
+            )
+
+            should_trigger = (current_user_message_count - last_processed_count) >= LLM_TRIGGER_MESSAGE_COUNT
+            if not should_trigger:
+                # queue 中に閾値が崩れていた (前 job が消化済み) → 空 invokedAgents で done
+                logger.info(f"[{room_id} job={job_id}] Threshold not met. Finishing as no-op.")
+                job_ref.update({
+                    "status": "done",
+                    "invokedAgents": [],
+                    "completedAt": iso_now(),
+                })
+                return
+
+            # vision pipeline 用の DB フラグ
+            session_ref.child("is_llm_processing").set(True)
+            try:
+                recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
+
+                room_ref = db.reference(f"rooms/{room_id}")
+                room_data = {
+                    "participants": room_ref.child("participants").get() or {},
+                    "representativeMode": room_ref.child("representativeMode").get() or False,
+                }
+
+                # Orchestrator + Agents 実行 (per-agent 進捗を jobs/{jobId}/agents に書く)
+                # NOTE: orchestrate_agents の background_tasks 引数は内部未使用。
+                # vision pipeline と同じ dummy を渡す。
+                from fastapi import BackgroundTasks as BT
+                dummy_bg = BT()
+                agent_result = await orchestrate_agents(
+                    task_payload, dummy_bg, recent_entries,
+                    task_payload.llmApiKey,
+                    session_data=session_data,
+                    room_data=room_data,
+                    job_id=job_id,
+                    room_id_for_job=room_id,
+                )
+
+                # ★ 後続 job が同じ user message を再処理しないよう必ず更新
+                session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
+
+                invoked_agents = agent_result.invokedAgents if agent_result else []
+                job_ref.update({
+                    "status": "done",
+                    "invokedAgents": invoked_agents,
+                    "completedAt": iso_now(),
+                })
+                logger.info(
+                    f"[{room_id} job={job_id}] Done. invokedAgents={invoked_agents}")
+            finally:
+                session_ref.child("is_llm_processing").set(False)
+    except Exception as e:
+        logger.error(f"[{room_id} job={job_id}] Failed: {e}", exc_info=True)
+        try:
+            job_ref.update({
+                "status": "error",
+                "error": {"code": -32000, "message": str(e)[:500]},
+                "completedAt": iso_now(),
+            })
+        except Exception as write_err:
+            logger.error(
+                f"[{room_id} job={job_id}] Failed to write error status: {write_err}")
+    finally:
+        try:
+            _purge_old_jobs(room_id)
+        except Exception as purge_err:
+            logger.warning(f"[{room_id} job={job_id}] purge failed: {purge_err}")
+
 
 @app.post("/invoke", response_model=JsonRpcResponse, summary="Invoke Noa Agent")
 async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+    """Issue #129: 即時 202 Accepted + jobId を返し、実処理は _run_invoke_job が担当する。
+
+    フロントは `rooms/{roomId}/jobs/{jobId}` を購読して進捗・結果を受け取る。
+    Agent 結果本体は従来通り `rooms/{roomId}/sessions/{sessionId}/{tasks|notes|...}` に書かれる。
+    """
     if request.method != "ExecuteTask":
         return JsonRpcResponse(error={"code": -32601, "message": "Method not found"}, id=request.id)
 
@@ -1274,9 +1658,9 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
         room_ref = db.reference(f"rooms/{room_id}")
         session_id = task_payload.sessionId
         session_data_path = get_session_data_path(room_id, session_id)
-        session_ref = db.reference(session_data_path)
         transcript_ref = db.reference(f"{session_data_path}/transcript")
 
+        # transcript への user message push (sync)
         if task_payload.messages and len(task_payload.messages) >= 1:
             latest_llm_message = task_payload.messages[0]
             if latest_llm_message.parts:
@@ -1291,102 +1675,64 @@ async def invoke_agent(request: JsonRpcRequest, background_tasks: BackgroundTask
                     text=text_to_save,
                     userId=task_payload.speakerId,
                     userName=resolved_speaker_name,
-                    timestamp=datetime.utcnow().isoformat() + "Z",
+                    timestamp=iso_now(),
                     role="user",
                     origin="human_chat"
                 )
-                new_db_entry_dict = new_db_entry.model_dump()
-
-                transcript_ref.push(new_db_entry_dict)
+                transcript_ref.push(new_db_entry.model_dump())
                 logger.info(
                     f"[{room_id}] Pushed new message to transcript (push-key format).")
 
-        # デモルームの場合はここで処理を終了
+        # デモルームは AI 処理せず同期 200 を返す (jobId を発行しない)
         if room_id == ALLOWED_DEMO_ROOM:
             logger.info(f"[{room_id}] Demo room message. Skipping AI processing.")
-            return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
+            return JsonRpcResponse(
+                result=AgentResult(invokedAgents=[]).model_dump(),
+                id=request.id,
+            )
 
-        # --- ロックで read→check→set(True) をアトミック化 ---
-        lock = _get_processing_lock(session_data_path)
-        should_trigger = False
-        async with lock:
-            session_data = session_ref.get()
-            if session_data is None:
-                session_data = {}
-
-            # transcript を Object (push-key) / list 両対応で読み込み
-            raw_transcript = session_data.get("transcript", {})
-            if isinstance(raw_transcript, dict):
-                db_transcript_entries = list(raw_transcript.values())
-            elif isinstance(raw_transcript, list):
-                db_transcript_entries = raw_transcript  # 後方互換
-            else:
-                db_transcript_entries = []
-
-            # origin allowlist でトリガー対象を判定（ループ防止）
-            TRIGGERABLE_ORIGINS = {"human_chat", "human_stt"}
-
-            def is_triggerable(entry: dict) -> bool:
-                origin = entry.get("origin")
-                if origin:
-                    return origin in TRIGGERABLE_ORIGINS
-                # 後方互換: origin 未設定 → source/role から推定
-                if entry.get("role") == "ai":
-                    return False
-                source = entry.get("source")
-                if source in ("stt", "manual"):
-                    return True
-                if source == "live-api" and entry.get("role") == "user":
-                    return True
-                return entry.get("role") != "ai"
-
-            trigger_messages = [e for e in db_transcript_entries if is_triggerable(e)]
-            current_user_message_count = len(trigger_messages)
-
-            last_processed_count = session_data.get("last_llm_processed_message_count", 0)
-            if last_processed_count > current_user_message_count:
-                last_processed_count = 0
-                session_ref.child("last_llm_processed_message_count").set(0)
-                logger.warning(f"[{room_id}] Reset last_llm_processed_message_count to 0.")
-
-            logger.info(
-                f"[{room_id}] Current user messages: {current_user_message_count}, Last processed: {last_processed_count}, Trigger: {LLM_TRIGGER_MESSAGE_COUNT}")
-
-            is_processing = session_data.get("is_llm_processing", False)
-            if is_processing:
-                logger.info(f"[{room_id}] LLM processing already in progress. Skipping.")
-                return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
-
-            should_trigger = (current_user_message_count - last_processed_count) >= LLM_TRIGGER_MESSAGE_COUNT
-            if should_trigger:
-                logger.info(f"[{room_id}] Triggering LLM processing.")
-                session_ref.child("is_llm_processing").set(True)
-
-        # --- ロック外で LLM 処理実行 ---
-        if not should_trigger:
-            return JsonRpcResponse(result=AgentResult(invokedAgents=[]), id=request.id)
-
-        # transcript を直近 N 件にスライスして LLM に渡す
-        recent_entries = db_transcript_entries[-LLM_TRANSCRIPT_LIMIT:]
-
-        # room-level データは transcript を含まない軽量取得
-        room_ref = db.reference(f"rooms/{room_id}")
-        room_data = {
-            "participants": room_ref.child("participants").get() or {},
-            "representativeMode": room_ref.child("representativeMode").get() or False,
-        }
-
+        # job_id 発行 → queued レコード書き込み → background_tasks に投入 → 202
+        job_id = str(uuid4())
+        job_record = JobRecord(
+            jobId=job_id,
+            sessionId=session_id,
+            speakerId=task_payload.speakerId,
+            requestId=request.id,
+            status="queued",
+            createdAt=iso_now(),
+        )
         try:
-            agent_processing_result = await orchestrate_agents(
-                task_payload, background_tasks, recent_entries,
-                task_payload.llmApiKey, session_data=session_data, room_data=room_data)
-            session_ref.child("last_llm_processed_message_count").set(current_user_message_count)
-            return JsonRpcResponse(result=agent_processing_result, id=request.id)
-        except Exception as e:
-            logger.error(f"[{room_id}] Error in orchestrate_agents: {e}", exc_info=True)
-            return JsonRpcResponse(error={"code": -32000, "message": "LLM processing error"}, id=request.id)
-        finally:
-            session_ref.child("is_llm_processing").set(False)
+            db.reference(f"rooms/{room_id}/jobs/{job_id}").set(
+                job_record.model_dump(exclude_none=True)
+            )
+        except Exception as write_err:
+            logger.error(
+                f"[{room_id}] Failed to write initial job record {job_id}: {write_err}",
+                exc_info=True,
+            )
+            return JsonRpcResponse(
+                error={"code": -32000, "message": "Failed to enqueue invoke job"},
+                id=request.id,
+            )
+
+        background_tasks.add_task(
+            _run_invoke_job,
+            room_id=room_id,
+            session_id=session_id,
+            job_id=job_id,
+            request_id=request.id,
+            task_payload=task_payload,
+        )
+
+        envelope = JsonRpcResponse(
+            result=JobAcceptedResult(jobId=job_id).model_dump(),
+            id=request.id,
+        )
+        return Response(
+            status_code=202,
+            content=envelope.model_dump_json(),
+            media_type="application/json",
+        )
 
     except Exception as e:
         logger.error(f"Error in /invoke: {e}", exc_info=True)

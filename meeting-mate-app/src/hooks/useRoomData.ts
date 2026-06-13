@@ -119,7 +119,13 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     const unsubscribe = onValue(roomRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
-        setRoomData(data as SessionData);
+        // Issue #129: rooms/{roomId}/jobs/{jobId} の更新でも本リスナーが発火する。
+        // jobs は useInvokeJob が個別購読するため、setRoomData に渡す前に剥がして
+        // SessionData の consumer から見えないようにする (誤参照防止)。
+        // ※ snapshot 自体は届くため再レンダーは別途発生しうる。
+        const { jobs: _jobs, ...dataWithoutJobs } = data ?? {};
+        void _jobs;
+        setRoomData(dataWithoutJobs as SessionData);
 
         // ルームレベルデータ
         const newParticipants = data.participants ? Object.entries(data.participants).map(([id, p]) => ({ id, ...(p as Omit<ParticipantEntry, 'id'>) })) : [];

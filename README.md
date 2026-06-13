@@ -86,7 +86,10 @@
 ## 🧠 バックエンドコンポーネント詳細
 
 ### 1. メイン処理 (`meeting-mate-app/server/main.py`)
-*   **APIエンドポイント (`POST /invoke`)**: フロントエンドからのリクエスト（ユーザーの最新発言と会話履歴を含む）を受け付けます。
+*   **APIエンドポイント (`POST /invoke`)** *(Issue #129 で非同期化)*: フロントエンドからのリクエスト（ユーザーの最新発言と会話履歴を含む）を受け付けます。**即座に `202 Accepted` + `{jobId}` を返し、実処理 (Orchestrator + Agents) は `_run_invoke_job` がバックグラウンドで実行**します。フロントは Firebase Realtime Database の `rooms/{roomId}/jobs/{jobId}` を購読して進捗 (queued → running → done/error) と各 agent の per-agent 進捗を受け取ります。Agent 結果本体は従来どおり `rooms/{roomId}/sessions/{sessionId}/{tasks|notes|...}` に書き込まれます。
+    *   **単一 worker 前提**: `asyncio.Lock` でセッション単位の直列化を行うため、本実装は単一 uvicorn worker を前提とします (`Dockerfile` で `--workers` 未指定 = デフォルト 1)。マルチインスタンスへスケールする際は RTDB transaction ベースの atomic lease への移行が必要です。
+    *   **クラッシュ復旧**: FastAPI startup イベントで `_recover_stale_jobs` が `running`/`queued` のまま残った job を `error: stale_after_restart` に格上げし、フロントが永久ロード状態に陥らないようにします。
+    *   **ライフサイクル**: 完了済み job (`done`/`error`) は `_purge_old_jobs` が 30 分後に自動削除。`running`/`queued` は決して削除しません。セッション削除時は `_purge_session_jobs` が該当 sessionId の job のみ削除します。
 *   **ディスパッチャーLLM (`orchestrate_agents` 関数)**:
     *   **役割**: 受信したユーザー発言（DBから取得したトランスクリプトをLLMMessage形式に変換したもの）、現在のセッションデータ（タスク、参加者、ノート、議題、概要図の概要）を分析し、どの専門エージェントにどのような処理を依頼するかをLLM（Vertex AI）に判断させます。
     *   **入力**:
