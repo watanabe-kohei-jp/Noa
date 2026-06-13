@@ -6,7 +6,7 @@ Tool Registry — ツール定義の一元管理
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 

@@ -8,7 +8,6 @@ if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
 from knowledge_base import (  # noqa: E402
-    MOCK_DATA,
     SNIPPET_MAX_LENGTH,
     VALID_CATEGORIES,
     KnowledgeResult,
