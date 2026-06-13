@@ -17,13 +17,11 @@ from fastapi import HTTPException  # noqa: E402
 import media_api  # noqa: E402
 from media_api import (  # noqa: E402
     ALLOWED_AUDIO_MIMES,
-    ALLOWED_IMAGE_MIMES,
     _normalize_mime_type,
     _reject_invalid_mime,
     upload_audio,
     upload_file,
 )
-from storage import MediaCategory  # noqa: E402
 
 
 # ================================================================

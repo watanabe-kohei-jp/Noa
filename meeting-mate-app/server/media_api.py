@@ -163,7 +163,7 @@ async def upload_batch(
         try:
             binary = base64.b64decode(b64_data)
         except Exception:
-            logger.warning(f"[Media] Invalid base64 in batch frame, skipping")
+            logger.warning("[Media] Invalid base64 in batch frame, skipping")
             continue
 
         rel_path, filename = await storage.save_file(
