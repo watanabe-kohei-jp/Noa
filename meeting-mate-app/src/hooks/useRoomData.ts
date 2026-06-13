@@ -2,8 +2,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ref, onValue, set, push, get } from 'firebase/database';
 import { database as db } from '@/firebase';
-import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, TranscriptEntry, SpeakerMap, MeetingSession, CalendarLinkItem } from '@/types/data';
+import { SessionData, ParticipantEntry, TodoItem, NoteItem, CurrentAgenda, OverviewDiagramData, OverviewDiagramEntry, TranscriptEntry, SpeakerMap, MeetingSession, CalendarLinkItem } from '@/types/data';
 import { useAuth } from '@/contexts/AuthContext';
+import { normalizeOverviewDiagrams, resolveActiveDiagram } from '@/lib/overview-diagram-utils';
 
 interface UseRoomDataResult {
   roomData: SessionData | null;
@@ -18,6 +19,8 @@ interface UseRoomDataResult {
   projectSubtitle: string;
   meetingDate: string;
   overviewDiagramData: OverviewDiagramData | null;
+  overviewDiagrams: OverviewDiagramEntry[];
+  activeOverviewDiagram: OverviewDiagramEntry | null;
   ownerUid: string | null;
   joinRequests: { [uid: string]: { name: string; requestedAt: string } };
   isLoading: boolean;
@@ -51,6 +54,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
   const [projectSubtitle, setProjectSubtitle] = useState<string>("会議サブタイトル");
   const [meetingDate, setMeetingDate] = useState<string>(new Date().toLocaleDateString('ja-JP'));
   const [overviewDiagramData, setOverviewDiagramData] = useState<OverviewDiagramData | null>(null);
+  const [overviewDiagrams, setOverviewDiagrams] = useState<OverviewDiagramEntry[]>([]);
   const [ownerUid, setOwnerUid] = useState<string | null>(null);
   const [joinRequests, setJoinRequests] = useState<{ [uid: string]: { name: string; requestedAt: string } }>({});
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -89,6 +93,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       setProjectSubtitle("会議サブタイトル");
       setMeetingDate(new Date().toLocaleDateString('ja-JP'));
       setOverviewDiagramData(null);
+      setOverviewDiagrams([]);
       setOwnerUid(null);
       setJoinRequests({});
       setApiKeyExpiresAt(null);
@@ -252,6 +257,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     } else {
       setOverviewDiagramData(null);
     }
+    setOverviewDiagrams(normalizeOverviewDiagrams(data));
   }, []);
 
   // セッションレベルデータのリスナー
@@ -264,6 +270,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     setCurrentAgenda(null);
     setSuggestedNextTopics([]);
     setOverviewDiagramData(null);
+    setOverviewDiagrams([]);
 
     if (!roomId || !currentSessionId) return;
 
@@ -281,6 +288,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
         setCurrentAgenda(null);
         setSuggestedNextTopics([]);
         setOverviewDiagramData(null);
+        setOverviewDiagrams([]);
         return;
       }
 
@@ -354,6 +362,7 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
       } else {
         setOverviewDiagramData(null);
       }
+      setOverviewDiagrams(normalizeOverviewDiagrams(data));
     });
 
     return () => { unsubscribe(); };
@@ -493,6 +502,8 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     }
   }, [roomId, isLoading, sessions.length, currentSessionId, roomData, createSession]);
 
+  const activeOverviewDiagram = resolveActiveDiagram(overviewDiagrams, currentAgenda?.mainTopic);
+
   return {
     roomData,
     participants,
@@ -506,6 +517,8 @@ export const useRoomData = (roomId: string | null): UseRoomDataResult => {
     projectSubtitle,
     meetingDate,
     overviewDiagramData,
+    overviewDiagrams,
+    activeOverviewDiagram,
     ownerUid,
     joinRequests,
     isLoading,

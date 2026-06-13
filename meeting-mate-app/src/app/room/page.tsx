@@ -25,7 +25,7 @@ import OverviewDiagramPanel from '@/app/room/components/OverviewDiagramPanel';
 import ConversationHistoryPanel from '@/app/room/components/ConversationHistoryPanel';
 import { participantColors, getParticipantColorIndex } from '@/app/room/components/ParticipantsList';
 import type { MermaidDiagramHandle } from '@/app/room/components/MermaidDiagram';
-import { exportDiagramAsSvg, exportDiagramAsPng, exportDiagramAsPdf, exportTextData, formatCalendarLinksAsJson } from '@/lib/export';
+import { exportDiagramAsSvg, exportDiagramAsPng, exportDiagramAsPdf, exportAllDiagramsAsSvg, exportTextData, formatCalendarLinksAsJson } from '@/lib/export';
 import type { ExportOption } from '@/components/export/ExportDropdown';
 import ExportButton from '@/components/export/ExportButton';
 import ExportDialog from '@/components/export/ExportDialog';
@@ -117,6 +117,8 @@ export default function RoomPage() {
   projectTitle,
   projectSubtitle,
   overviewDiagramData,
+  overviewDiagrams,
+  activeOverviewDiagram,
   pageCurrentUser,
     transcript,
     apiKeyExpiresAt,
@@ -659,8 +661,8 @@ export default function RoomPage() {
   }, []);
 
   const panelConfig = React.useMemo(() =>
-    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, speakerMap, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
-    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagramData, selectedTheme, currentTheme, chatHistory, transcript, speakerMap, handleParticipantEnter, handleParticipantLeave, calendarLinks]
+    getPanelConfig(participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagrams, selectedTheme, currentTheme, chatHistory, transcript, speakerMap, handleParticipantEnter, handleParticipantLeave, diagramRef, calendarLinks),
+    [participants, notes, tasks, currentAgenda, suggestedNextTopics, overviewDiagrams, selectedTheme, currentTheme, chatHistory, transcript, speakerMap, handleParticipantEnter, handleParticipantLeave, calendarLinks]
   );
 
   // パネルごとのエクスポートオプションを生成
@@ -678,11 +680,12 @@ export default function RoomPage() {
 
     switch (panelId) {
       case 'overviewDiagram': {
-        if (!overviewDiagramData?.mermaidDefinition) return [];
-        const title = overviewDiagramData.title;
-        return [
+        // Issue #131: active な論点の図 (PNG/PDF/SVG) + 全件 SVG エクスポート
+        if (!activeOverviewDiagram?.mermaidDefinition) return [];
+        const title = activeOverviewDiagram.title;
+        const baseOptions: ExportOption[] = [
           {
-            label: 'SVG でダウンロード',
+            label: 'SVG でダウンロード (現在の論点)',
             format: 'svg',
             onClick: () => {
               const def = diagramRef.current?.getProcessedDefinition();
@@ -690,7 +693,7 @@ export default function RoomPage() {
             },
           },
           {
-            label: 'PNG でダウンロード',
+            label: 'PNG でダウンロード (現在の論点)',
             format: 'png',
             onClick: () => {
               const container = diagramRef.current?.getContainer();
@@ -698,7 +701,7 @@ export default function RoomPage() {
             },
           },
           {
-            label: 'PDF でダウンロード',
+            label: 'PDF でダウンロード (現在の論点)',
             format: 'pdf',
             onClick: () => {
               const container = diagramRef.current?.getContainer();
@@ -706,6 +709,14 @@ export default function RoomPage() {
             },
           },
         ];
+        if (overviewDiagrams.length > 1) {
+          baseOptions.push({
+            label: `全 ${overviewDiagrams.length} 件を SVG でダウンロード`,
+            format: 'svg',
+            onClick: () => exportAllDiagramsAsSvg(overviewDiagrams, currentTheme),
+          });
+        }
+        return baseOptions;
       }
       case 'tasks':
         return tasks.length > 0 ? makeTextOptions('tasks', ['markdown', 'csv', 'json']) : [];
@@ -735,7 +746,7 @@ export default function RoomPage() {
       default:
         return [];
     }
-  }, [overviewDiagramData, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId, calendarLinks]);
+  }, [activeOverviewDiagram, overviewDiagrams, currentTheme, transcript, tasks, notes, currentAgenda, suggestedNextTopics, sessions, currentSessionId, calendarLinks]);
 
   // zoomPanelIdが設定されたらモーダルを表示
   useEffect(() => {
@@ -815,7 +826,7 @@ export default function RoomPage() {
                       tasks={tasks}
                       currentAgenda={currentAgenda}
                       suggestedNextTopics={suggestedNextTopics}
-                      overviewDiagramData={overviewDiagramData}
+                      overviewDiagrams={overviewDiagrams}
                       currentTheme={selectedTheme}
                       themeType={currentTheme}
                       chatHistory={chatHistory}
@@ -894,7 +905,7 @@ export default function RoomPage() {
               tasks={tasks}
               currentAgenda={currentAgenda}
               suggestedNextTopics={suggestedNextTopics}
-              overviewDiagramData={overviewDiagramData}
+              overviewDiagrams={overviewDiagrams}
               currentTheme={selectedTheme}
               themeType={currentTheme}
               chatHistory={chatHistory}
@@ -1232,7 +1243,8 @@ export default function RoomPage() {
             }`}>
               {modalContent.panelId === 'overviewDiagram' ? (
                 <OverviewDiagramPanel
-                  diagramData={overviewDiagramData}
+                  diagrams={overviewDiagrams}
+                  mainTopic={currentAgenda?.mainTopic}
                   currentTheme={selectedTheme}
                   themeType={currentTheme}
                   isFullScreen={true}
@@ -1311,7 +1323,11 @@ export default function RoomPage() {
           notes,
           currentAgenda,
           suggestedNextTopics,
-          overviewDiagram: overviewDiagramData,
+          // Issue #131: overviewDiagrams (全件) を優先。formatter が空ならフォールバック
+          overviewDiagrams,
+          overviewDiagram: activeOverviewDiagram
+            ? { title: activeOverviewDiagram.title, mermaidDefinition: activeOverviewDiagram.mermaidDefinition }
+            : (overviewDiagramData ?? null),
           calendarLinks,
         } satisfies ReportData}
       />

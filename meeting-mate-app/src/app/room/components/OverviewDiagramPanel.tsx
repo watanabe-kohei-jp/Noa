@@ -1,12 +1,17 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect, useMemo } from 'react';
 import { GitBranch } from 'lucide-react';
 import { themes } from '@/constants/themes';
-import { OverviewDiagramData } from '@/types/data';
+import type { OverviewDiagramEntry } from '@/types/data';
+import { resolveActiveDiagram } from '@/lib/overview-diagram-utils';
 import MermaidDiagram from './MermaidDiagram';
 import type { MermaidDiagramHandle } from './MermaidDiagram';
+import OverviewDiagramTabs from './OverviewDiagramTabs';
 
 interface OverviewDiagramPanelProps {
-  diagramData: OverviewDiagramData | null;
+  /** 論点単位の概要図リスト (Issue #131) */
+  diagrams: OverviewDiagramEntry[];
+  /** 現在の議題 (タブの初期選択判定に使用) */
+  mainTopic?: string | null;
   currentTheme: typeof themes.dark;
   themeType: 'light' | 'dark' | 'modern';
   isFullScreen?: boolean;
@@ -14,11 +19,33 @@ interface OverviewDiagramPanelProps {
   diagramRef?: React.RefObject<MermaidDiagramHandle | null>;
 }
 
-const OverviewDiagramPanel: React.FC<OverviewDiagramPanelProps> = React.memo(({ diagramData, currentTheme, themeType, isFullScreen = false, diagramRef }) => {
+const OverviewDiagramPanel: React.FC<OverviewDiagramPanelProps> = React.memo(({ diagrams, mainTopic, currentTheme, themeType, isFullScreen = false, diagramRef }) => {
   const internalRef = useRef<MermaidDiagramHandle>(null);
   const ref = diagramRef || internalRef;
 
-  if (!diagramData || !diagramData.mermaidDefinition) {
+  // ユーザーがタブを手動選択していなければ mainTopic ベースで自動追従
+  const autoActive = useMemo(
+    () => resolveActiveDiagram(diagrams, mainTopic),
+    [diagrams, mainTopic]
+  );
+  const [manualTopicId, setManualTopicId] = useState<string | null>(null);
+
+  // mainTopic が変わった瞬間に手動選択をリセット (新議題に追従)
+  useEffect(() => {
+    setManualTopicId(null);
+  }, [mainTopic]);
+
+  // 手動選択が現存しなくなったら (図が削除された等) リセット
+  useEffect(() => {
+    if (manualTopicId && !diagrams.some((d) => d.topicId === manualTopicId)) {
+      setManualTopicId(null);
+    }
+  }, [diagrams, manualTopicId]);
+
+  const activeTopicId = manualTopicId ?? autoActive?.topicId ?? null;
+  const active = activeTopicId ? diagrams.find((d) => d.topicId === activeTopicId) : null;
+
+  if (diagrams.length === 0 || !active || !active.mermaidDefinition) {
     return (
       <div className={`${isFullScreen ? 'w-full h-full' : `${currentTheme.cardInner} border rounded-xl p-4`} flex items-center justify-center`} style={isFullScreen ? {} : { minHeight: '200px' }}>
         <div className="text-center">
@@ -30,9 +57,18 @@ const OverviewDiagramPanel: React.FC<OverviewDiagramPanelProps> = React.memo(({ 
       </div>
     );
   }
+
   return (
-    <div className={`${isFullScreen ? 'w-full h-full' : `${currentTheme.cardInner} border rounded-xl p-4`} flex items-center justify-center`} style={isFullScreen ? {} : { minHeight: '200px' }}>
-      <MermaidDiagram ref={ref} definition={diagramData.mermaidDefinition} theme={themeType} />
+    <div className={`${isFullScreen ? 'w-full h-full flex flex-col' : `${currentTheme.cardInner} border rounded-xl p-4 flex flex-col`}`} style={isFullScreen ? {} : { minHeight: '200px' }}>
+      <OverviewDiagramTabs
+        diagrams={diagrams}
+        activeTopicId={activeTopicId}
+        onSelect={setManualTopicId}
+        currentTheme={currentTheme}
+      />
+      <div className="flex-1 flex items-center justify-center min-h-0">
+        <MermaidDiagram ref={ref} definition={active.mermaidDefinition} theme={themeType} />
+      </div>
     </div>
   );
 });

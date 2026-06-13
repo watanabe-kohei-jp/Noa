@@ -1,9 +1,34 @@
+"""論点 (topic) 単位の概要図エージェント (Issue #131).
+
+旧 overviewDiagram (単数) は migration shim 経由で透過的に扱う。新スキーマ
+overviewDiagrams (リスト) を返却し、orchestrator 側で Firebase の per-topic
+パスに書き込む。
+"""
+from __future__ import annotations
+
+import asyncio
 import json
-from typing import List, Tuple, Dict, Any
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_provider import llm_complete
 from mermaid_utils import validate_and_clean_mermaid
 from config import logger
+from agents.overview_diagram_utils import (
+    GENERAL_TOPIC_ID,
+    make_entry,
+    normalize_overview_diagrams,
+    sanitize_target_topic_id,
+    slugify_topic_id,
+)
+
+
+# `target_topic_id="*"` 時の並列上限 (コスト爆発防止)
+WILDCARD_CAP = 5
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class OverviewDiagramAgent:
@@ -12,13 +37,23 @@ class OverviewDiagramAgent:
         logger.info(
             f"OverviewDiagramAgent initialized with config: {config_path}")
 
-    async def execute(self, instruction: str, conversation_history: List[Any], current_data: Dict[str, Any], model_name: str, api_key: str, **kwargs) -> Tuple[Dict[str, Any], str]:
+    async def execute(
+        self,
+        instruction: str,
+        conversation_history: List[Any],
+        current_data: Dict[str, Any],
+        model_name: str,
+        api_key: str,
+        **kwargs,
+    ) -> Tuple[Dict[str, Any], str]:
         return await handle_overview_diagram_request(
             instruction=instruction,
             conversation_history=conversation_history,
             current_data=current_data,
             model_name=model_name,
-            api_key=api_key
+            api_key=api_key,
+            target_topic_id=kwargs.get("target_topic_id"),
+            closing_update=bool(kwargs.get("closing_update", False)),
         )
 
 
@@ -27,34 +62,223 @@ async def handle_overview_diagram_request(
     conversation_history: List[Any],
     current_data: Dict[str, Any],
     model_name: str,
-    api_key: str
+    api_key: str,
+    target_topic_id: Optional[str] = None,
+    closing_update: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
-    logger.info(f"Overview diagram management for instruction: {instruction}")
-    session_data = current_data
-    overview_diagram_obj = session_data.get("overviewDiagram", {
-                                            "mermaidDefinition": "graph TD;\n    A[会議開始];", "title": "概要図"})
-    if not isinstance(overview_diagram_obj, dict):
-        overview_diagram_obj = {
-            "mermaidDefinition": "graph TD;\n    A[会議開始];", "title": "概要図"}
+    """論点単位の概要図を生成/更新する。
 
-    existing_mermaid_definition = overview_diagram_obj.get(
-        "mermaidDefinition", "graph TD;\n    A[会議開始];")
-    existing_title = overview_diagram_obj.get("title", "概要図")
+    target_topic_id:
+      - None: currentAgenda.mainTopic から派生 (slug)。無ければ "_general"
+      - 具体的な topicId: その entry のみ更新 (存在しなければ closing_update でない時に新規作成)
+      - "*": 既存 entry を並列で全更新 (cap=WILDCARD_CAP)
+    closing_update:
+      - True: 議題遷移 hook からの "締めくくり更新"。対象が無い時は no-op
+    """
+    diagrams = normalize_overview_diagrams(current_data)
+    # Issue #131 P0 fix: dispatcher が漏らした非正規 ID を二重防御で sanitize する。
+    # P1 fix #6: safe な ID はそのまま通し round-trip を保つ。
+    target_topic_id = sanitize_target_topic_id(target_topic_id)
+    logger.info(
+        f"Overview diagram management: instruction={instruction!r}, "
+        f"target_topic_id={target_topic_id!r}, closing_update={closing_update}, "
+        f"existing_count={len(diagrams)}"
+    )
 
     if not model_name or not api_key:
         logger.warning("LLM not configured for overview diagram management.")
-        return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "概要図は更新されませんでした (LLM未設定)。"
+        return (
+            {"overviewDiagrams": []},
+            "概要図は更新されませんでした (LLM未設定)。",
+        )
+
+    # ---- "*": 全 topic 並列更新 ----
+    if target_topic_id == "*":
+        if not diagrams:
+            return ({"overviewDiagrams": []}, "更新対象の概要図がありません。")
+        targets = diagrams[:WILDCARD_CAP]
+        if len(diagrams) > WILDCARD_CAP:
+            logger.warning(
+                f"[OverviewDiagram] wildcard update truncated: {len(diagrams)} -> {WILDCARD_CAP}"
+            )
+        return await _update_many(
+            diagrams=diagrams,
+            targets=targets,
+            instruction=instruction,
+            conversation_history=conversation_history,
+            current_data=current_data,
+            model_name=model_name,
+            api_key=api_key,
+        )
+
+    # ---- 単体更新の target 解決 ----
+    topic_id = target_topic_id
+    if not topic_id:
+        main_topic_slug = slugify_topic_id(
+            (current_data.get("agenda") or {}).get("mainTopic")
+        )
+        if main_topic_slug:
+            topic_id = main_topic_slug
+        elif len(diagrams) == 1:
+            # mainTopic 無し + 単一 entry (典型: legacy migration 直後) はそれを更新
+            topic_id = diagrams[0]["topicId"]
+        else:
+            topic_id = GENERAL_TOPIC_ID
+    existing = next((d for d in diagrams if d.get("topicId") == topic_id), None)
+
+    if existing is None and closing_update:
+        return (
+            {"overviewDiagrams": []},
+            f"closing update 対象 '{topic_id}' が見つからずスキップしました。",
+        )
+
+    return await _update_single(
+        diagrams=diagrams,
+        topic_id=topic_id,
+        existing=existing,
+        instruction=instruction,
+        conversation_history=conversation_history,
+        current_data=current_data,
+        model_name=model_name,
+        api_key=api_key,
+        closing_update=closing_update,
+    )
+
+
+async def _update_single(
+    diagrams: List[Dict[str, Any]],
+    topic_id: str,
+    existing: Optional[Dict[str, Any]],
+    instruction: str,
+    conversation_history: List[Any],
+    current_data: Dict[str, Any],
+    model_name: str,
+    api_key: str,
+    closing_update: bool,
+) -> Tuple[Dict[str, Any], str]:
+    """1 個の topic の概要図を生成/更新する。
+
+    Issue #131 P0 fix: 戻り値は「実際に書き換えた entry だけ」を含む。空配列なら
+    no-op で writer は何も書かない。これにより並列実行時の stale overwrite を防ぐ。
+    """
+
+    existing_mermaid = (existing or {}).get("mermaidDefinition") or "graph TD;\n    A[会議開始];"
+    topic_title = (existing or {}).get("title") or _derive_title_from_instruction(instruction, topic_id, current_data)
 
     try:
-        history_str = "\n".join(
-            [f"{msg.role.capitalize()}: {msg.parts[0]['text']}" for msg in conversation_history if msg.parts and msg.parts[0].get('text')])
+        new_mermaid = await _llm_generate_mermaid(
+            instruction=instruction,
+            conversation_history=conversation_history,
+            current_data=current_data,
+            existing_mermaid=existing_mermaid,
+            topic_id=topic_id,
+            topic_title=topic_title,
+            model_name=model_name,
+            api_key=api_key,
+        )
+    except Exception as e:
+        logger.error(f"Error in _update_single for {topic_id}: {e}", exc_info=True)
+        return (
+            {"overviewDiagrams": []},
+            f"概要図 '{topic_title}' の処理中にエラーが発生しました: {e}",
+        )
 
-        session_data_json_str = json.dumps(
-            session_data, ensure_ascii=False, indent=2)
+    if not new_mermaid:
+        logger.error(
+            f"[OverviewDiagram] LLM response failed validation for topic_id={topic_id}"
+        )
+        return (
+            {"overviewDiagrams": []},
+            f"LLM response was not in the expected Mermaid format for topic '{topic_title}'.",
+        )
 
-        prompt = f"""You are a meeting overview diagram creation assistant.
+    now = _now_iso()
+    new_status = "closed" if closing_update else (existing or {}).get("status") or "active"
+    updated_entry = make_entry(
+        topic_id=topic_id,
+        title=topic_title,
+        mermaid_definition=new_mermaid,
+        status=new_status,
+        created_at=(existing or {}).get("createdAt") or now,
+        last_updated=now,
+    )
+
+    user_message = _format_user_message(updated_entry, closing_update)
+    logger.info(
+        f"Saved overview diagram topic_id={topic_id} status={new_status} "
+        f"mermaid_len={len(new_mermaid)}"
+    )
+    return ({"overviewDiagrams": [updated_entry]}, user_message)
+
+
+async def _update_many(
+    diagrams: List[Dict[str, Any]],
+    targets: List[Dict[str, Any]],
+    instruction: str,
+    conversation_history: List[Any],
+    current_data: Dict[str, Any],
+    model_name: str,
+    api_key: str,
+) -> Tuple[Dict[str, Any], str]:
+    """複数 topic を並列で更新する (`target_topic_id="*"` 時)。"""
+    results = await asyncio.gather(
+        *[
+            _update_single(
+                diagrams=diagrams,
+                topic_id=t["topicId"],
+                existing=t,
+                instruction=instruction,
+                conversation_history=conversation_history,
+                current_data=current_data,
+                model_name=model_name,
+                api_key=api_key,
+                closing_update=False,
+            )
+            for t in targets
+        ],
+        return_exceptions=False,
+    )
+
+    # Issue #131 P0 fix: 各 _update_single は差分 (更新された entry 1 件 or 空) を返す。
+    # 全 LLM 呼び出しの差分を平坦化してまとめて返却 → writer は per-topic に書く。
+    updated_entries: List[Dict[str, Any]] = []
+    for _target, (result_payload, _msg) in zip(targets, results):
+        for entry in result_payload.get("overviewDiagrams", []):
+            if isinstance(entry, dict) and entry.get("topicId"):
+                updated_entries.append(entry)
+
+    user_message = f"{len(updated_entries)}/{len(targets)} 件の概要図を並列更新しました。"
+    return ({"overviewDiagrams": updated_entries}, user_message)
+
+
+async def _llm_generate_mermaid(
+    instruction: str,
+    conversation_history: List[Any],
+    current_data: Dict[str, Any],
+    existing_mermaid: str,
+    topic_id: str,
+    topic_title: str,
+    model_name: str,
+    api_key: str,
+) -> Optional[str]:
+    """LLM を呼んで Mermaid 定義を生成。retry 2 回。"""
+    history_str = "\n".join(
+        [
+            f"{msg.role.capitalize()}: {msg.parts[0]['text']}"
+            for msg in conversation_history
+            if msg.parts and msg.parts[0].get("text")
+        ]
+    )
+
+    session_data_json_str = json.dumps(current_data, ensure_ascii=False, indent=2)
+
+    prompt = f"""You are a meeting overview diagram creation assistant.
+
+**対象 topic: '{topic_title}' (topicId={topic_id})**
+このセッションには複数の論点 (topic) が並列に存在し、それぞれ独立した概要図を持ちます。今回更新するのは上記 1 つの topic の図のみです。**他の topic に関する記述は一切含めないでください。**
+
 Analyze the current complete session data (JSON format), past conversation history (reference information), and the new instruction "{instruction}" that should be addressed this time.
-Based on this analysis, generate or update a Mermaid.js **`graph TD` or `graph LR`** diagram definition that visually represents the meeting content and project structure.
+Based on this analysis, generate or update a Mermaid.js **`graph TD` or `graph LR`** diagram definition that visually represents this specific topic's content and structure.
 
 **CRITICAL OUTPUT REQUIREMENTS:**
 - Output ONLY the raw Mermaid diagram code
@@ -91,7 +315,6 @@ Based on this analysis, generate or update a Mermaid.js **`graph TD` or `graph L
      - Information/notes: `["Text"]` (rectangle, light color)
 
 2. **Flat Design Styling with classDef**:
-   - **Important**: Set stroke to the same color as fill to create borderless flat appearance
 ```
 classDef primary fill:#EFF6FF,stroke:#EFF6FF,stroke-width:2px,color:#1E40AF,font-weight:bold
 classDef secondary fill:#F3F4F6,stroke:#F3F4F6,stroke-width:1.5px,color:#374151
@@ -103,55 +326,25 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
 ```
 
 3. **Class Assignment (CRITICAL RULE)**:
-   - **To avoid syntax errors, ALWAYS use `class` command for class assignment**
-   - NEVER use `:::` method during node definition as it causes errors
+   - **ALWAYS use `class` command for class assignment**
+   - NEVER use `:::` method during node definition
    - Define nodes first, then apply styles with `class` commands
-   - **Correct example:**
-     ```
-     PERSON_A(("Tanaka Taro"))
-     TASK_B("Specification Creation")
-     class PERSON_A person
-     class TASK_B accent
-     ```
-   - **FORBIDDEN example (causes errors):**
-     ```
-     PERSON_A(("Tanaka Taro")):::person
-     TASK_B("Specification Creation"):::accent
-     ```
 
 4. **Edge Styling**:
-   - **Solid arrows**: Direct relationships `-->`
-   - **Dotted arrows**: Indirect/reference relationships `-.->`
-   - **Thick arrows**: Important dependencies `==>`
-   - **Labels**: Short descriptions clarifying relationships
+   - **Solid arrows**: `-->`  **Dotted**: `-.->`  **Thick**: `==>`
 
 5. **Subgraph Organization**:
-   - Logically group related elements to clarify structure.
-   - **Subgraph Syntax (CRITICAL RULE):**
-     - To avoid syntax errors, subgraph definitions **MUST** follow the format: `subgraph "Title"`.
-     - The title **MUST** be enclosed in double quotes.
-     - The title string itself **MUST NOT contain parentheses `()` or other special characters**. Use simple, descriptive text.
-     - **Correct Example:**
-       ```
-       subgraph "Existing Cloud Environment"
-           SRV_A["Server A"]
-           DB_B["Database B"]
-       end
-       ```
-     - **FORBIDDEN Example (causes syntax errors):**
-       ```
-       subgraph 既存環境 (現行クラウド)
-       ```
+   - Subgraph titles MUST be in double quotes, no parentheses/special chars.
+   - Correct: `subgraph "Existing Cloud Environment"`
 
 **SYNTAX RULES:**
 - Use `%%` for comments, never single `%`
 - Avoid Unicode characters in comments
-- Keep node text simple and ASCII-compatible when possible
-- Use double quotes only when required by Mermaid syntax
+- Keep node text simple
 
 **REMEMBER: Output ONLY the raw Mermaid code. No JSON, no markdown blocks, no explanations.**
 
-現在のセッションデータ:
+現在のセッションデータ (全 topic 含む。`{topic_title}` に関連する部分のみ抽出して反映してください):
 ```json
 {session_data_json_str}
 ```
@@ -159,83 +352,73 @@ classDef decision fill:#D1FAE5,stroke:#D1FAE5,stroke-width:2px,color:#047857,fon
 過去の会話履歴 (参考情報):
 {history_str}
 
-既存のMermaid定義 (更新のベースとしてください。なければ新規作成):
+この topic の既存 Mermaid 定義 (更新のベースとしてください。なければ新規作成):
 ```mermaid
-{existing_mermaid_definition}
+{existing_mermaid}
 ```
 
 今回対応すべき新しい指示: {instruction}
 
 更新された概要図のMermaid.js定義 (raw Mermaidコードのみ):"""
 
-        retry_extra = (
-            "\n\n**CRITICAL (previous generation had format errors): "
-            "Start with `graph TD` or `graph LR`. "
-            "Do NOT use flowchart, sequenceDiagram, or any other type. "
-            "Do NOT wrap in code blocks. Output raw Mermaid code ONLY.**"
-        )
+    retry_extra = (
+        "\n\n**CRITICAL (previous generation had format errors): "
+        "Start with `graph TD` or `graph LR`. "
+        "Do NOT use flowchart, sequenceDiagram, or any other type. "
+        "Do NOT wrap in code blocks. Output raw Mermaid code ONLY.**"
+    )
+    attempts = [(None, ""), (None, retry_extra)]
 
-        attempts = [
-            (None, ""),
-            (None, retry_extra),
-        ]
+    for attempt_idx, (_temp, extra) in enumerate(attempts):
+        try:
+            llm_response_text = await llm_complete(
+                model=model_name, prompt=prompt + extra, api_key=api_key
+            )
+            logger.info(
+                f"LLM overview diagram response topic_id={topic_id} attempt={attempt_idx + 1}: {llm_response_text}"
+            )
+            if not llm_response_text:
+                logger.warning(
+                    f"[OverviewDiagram] Empty response topic_id={topic_id} (attempt {attempt_idx + 1}/{len(attempts)})"
+                )
+                continue
+            cleaned = validate_and_clean_mermaid(
+                llm_response_text, allowed_types=["flowchart"]
+            )
+            if cleaned:
+                if attempt_idx > 0:
+                    logger.info(
+                        f"[OverviewDiagram] Succeeded on retry topic_id={topic_id} (attempt {attempt_idx + 1})"
+                    )
+                return cleaned
+            logger.warning(
+                f"[OverviewDiagram] Validation failed topic_id={topic_id} (attempt {attempt_idx + 1}/{len(attempts)})"
+            )
+        except Exception as e:
+            logger.error(
+                f"[OverviewDiagram] LLM call failed topic_id={topic_id} (attempt {attempt_idx + 1}): {e}"
+            )
+            # 例外時は再試行せず外側 _update_single の except に伝播させる
+            raise
+    return None
 
-        logger.info(
-            f"Sending overview diagram prompt to LLM. Instruction: {instruction}")
 
-        new_mermaid_definition = None
-        for attempt_idx, (_temp, extra) in enumerate(attempts):
-            try:
-                llm_response_text = await llm_complete(
-                    model=model_name, prompt=prompt + extra, api_key=api_key)
+def _derive_title_from_instruction(
+    instruction: str, topic_id: str, current_data: Dict[str, Any]
+) -> str:
+    """新規 entry の title を導出 (mainTopic > instruction 先頭 > topicId)。"""
+    main_topic = (current_data.get("agenda") or {}).get("mainTopic")
+    if main_topic and slugify_topic_id(main_topic) == topic_id:
+        return main_topic
+    if instruction and instruction.strip():
+        head = instruction.strip()[:30]
+        return f"概要図: {head}" + ("..." if len(instruction.strip()) > 30 else "")
+    return topic_id
 
-                logger.info(f"LLM overview diagram response (attempt {attempt_idx + 1}): {llm_response_text}")
 
-                if not llm_response_text:
-                    logger.warning(f"[OverviewDiagram] Empty response (attempt {attempt_idx + 1}/{len(attempts)})")
-                    continue
-
-                new_mermaid_definition = validate_and_clean_mermaid(llm_response_text, allowed_types=["flowchart"])
-                if new_mermaid_definition:
-                    if attempt_idx > 0:
-                        logger.info(f"[OverviewDiagram] Succeeded on retry (attempt {attempt_idx + 1})")
-                    break
-                logger.warning(f"[OverviewDiagram] Validation failed (attempt {attempt_idx + 1}/{len(attempts)})")
-            except Exception as e:
-                logger.error(f"[OverviewDiagram] LLM call failed (attempt {attempt_idx + 1}): {e}")
-                break
-
-        if not new_mermaid_definition:
-            logger.error("LLM response failed Mermaid validation, using existing definition")
-            return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, "LLM response was not in the expected Mermaid format."
-
-        new_title = existing_title
-        if instruction and len(instruction.strip()) > 0:
-            title_words = instruction.strip()[:30]
-            if len(instruction.strip()) > 30:
-                title_words += "..."
-            new_title = f"概要図: {title_words}"
-
-        user_message = f"""概要図がLLMによって更新されました。
-以下は生成されたMermaid定義です。お手数ですが、この定義をコピーして Mermaid Live Editor (https://mermaid.live) などで直接貼り付けて、構文エラーが発生するかどうかご確認ください。
-
-```mermaid
-{new_mermaid_definition}
-```
-"""
-        overview_diagram_data = {
-            "mermaidDefinition": new_mermaid_definition,
-            "title": new_title
-        }
-
-        logger.info(
-            f"Saving overview diagram with mermaidDefinition length: {len(new_mermaid_definition) if new_mermaid_definition else 0}")
-
-        return {
-            "overviewDiagram": overview_diagram_data
-        }, user_message
-
-    except Exception as e:
-        logger.error(
-            f"Error in handle_overview_diagram_request: {e}", exc_info=True)
-        return {"overviewDiagram": {"mermaidDefinition": existing_mermaid_definition, "title": existing_title}}, f"概要図の処理中にエラーが発生しました: {e}"
+def _format_user_message(entry: Dict[str, Any], closing_update: bool) -> str:
+    suffix = " (議題完了に伴う締めくくり更新)" if closing_update else ""
+    return (
+        f"概要図 '{entry['title']}'{suffix} を更新しました。\n"
+        f"```mermaid\n{entry['mermaidDefinition']}\n```"
+    )

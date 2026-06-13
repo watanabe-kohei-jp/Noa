@@ -49,11 +49,23 @@ export type NoteItem = { id: string; type: "memo" | "decision" | "issue"; text: 
 export type Notes = NoteItem[];
 export interface AgendaItemDetail { id: string; text: string; timestamp?: string; }
 export interface CurrentAgenda { mainTopic: string; details: AgendaItemDetail[]; }
-export type OverviewDiagramData = { 
-  title: string; 
-  mermaidDefinition: string; 
+export type OverviewDiagramData = {
+  title: string;
+  mermaidDefinition: string;
 };
-export interface SessionData { sessionId?: string; sessionTitle?: string; startTime?: string; participants: ParticipantsData; transcript: TranscriptEntry[]; tasks: TodoItem[]; notes: Notes; projectTitle?: string; projectSubtitle?: string; meetingDate?: string; overviewDiagram?: OverviewDiagramData; currentAgenda?: CurrentAgenda; suggestedNextTopics?: string[]; }
+
+/** 論点 (topic) 単位の概要図エントリ (Issue #131) */
+export type OverviewDiagramEntry = {
+  topicId: string;
+  title: string;
+  mermaidDefinition: string;
+  status: "active" | "closed";
+  createdAt: string;
+  lastUpdated: string;
+};
+export type OverviewDiagrams = OverviewDiagramEntry[];
+
+export interface SessionData { sessionId?: string; sessionTitle?: string; startTime?: string; participants: ParticipantsData; transcript: TranscriptEntry[]; tasks: TodoItem[]; notes: Notes; projectTitle?: string; projectSubtitle?: string; meetingDate?: string; overviewDiagram?: OverviewDiagramData; overviewDiagrams?: OverviewDiagramEntry[] | Record<string, OverviewDiagramEntry>; currentAgenda?: CurrentAgenda; suggestedNextTopics?: string[]; }
 
 /** セッション情報 */
 export interface MeetingSession {

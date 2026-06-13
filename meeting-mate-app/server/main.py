@@ -14,6 +14,7 @@ from media_api import router as media_router
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
+from agents.overview_diagram_utils import sanitize_target_topic_id, slugify_topic_id
 from agents.notes_agent import NotesGeneratorAgent
 from agents.agenda_agent import AgendaManagementAgent
 from firebase_admin import credentials, auth as firebase_auth, db
@@ -24,7 +25,7 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional, Tuple, Literal
 from uuid import uuid4
 from dotenv import load_dotenv
 import logging
@@ -404,7 +405,10 @@ class AgentResult(BaseModel):
     updatedTasks: Optional[List[Dict[str, Any]]] = None
     updatedNotes: Optional[List[Dict[str, Any]]] = None
     updatedAgenda: Optional[Dict[str, Any]] = None
+    # Issue #131: 旧 1 件互換 (active な topic 1 件を抜粋)
     updatedOverviewDiagram: Optional[Dict[str, Any]] = None
+    # Issue #131: 新スキーマ — 論点単位のリスト
+    updatedOverviewDiagrams: Optional[List[Dict[str, Any]]] = None
 
 
 class JsonRpcResponse(BaseModel):
@@ -915,7 +919,8 @@ def _resolve_api_keys(room_id: str, room_config: dict, agent_models: dict, defau
 async def process_single_agent(
     agent, task_payload: TaskPayload, agent_name: str, instruction_text: str,
     results_dict: dict, conversation_history_for_agent: List[LLMMessage],
-    model_name: str, api_key: str
+    model_name: str, api_key: str,
+    agent_kwargs: Optional[Dict[str, Any]] = None,
 ):
     logger.info(
         f"Invoking {agent_name} for task {task_payload.taskId} in room {task_payload.roomId} "
@@ -933,6 +938,9 @@ async def process_single_agent(
                 "notes": session_data_snapshot.get("notes"),
                 "agenda": session_data_snapshot.get("currentAgenda"),
                 "overviewDiagram": session_data_snapshot.get("overviewDiagram"),
+                # Issue #131: 新スキーマ (論点単位リスト)。OverviewDiagramAgent 内で
+                # normalize_overview_diagrams() を通して正規化する。
+                "overviewDiagrams": session_data_snapshot.get("overviewDiagrams"),
                 "suggestedNextTopics": session_data_snapshot.get("suggestedNextTopics"),
                 "visionContext": session_data_snapshot.get("visionContext"),
             }
@@ -953,17 +961,48 @@ async def process_single_agent(
                 "model_name": model_name,
                 "api_key": api_key,
             }
+            if agent_kwargs:
+                # dispatcher が action 由来で渡す追加引数 (例: target_topic_id, closing_update)
+                agent_specific_args.update(agent_kwargs)
             updated_data_from_agent, user_message_text = await agent.execute(**agent_specific_args)
 
             if updated_data_from_agent:
                 for key, value in updated_data_from_agent.items():
-                    if value is not None:
-                        db_key = key
-                        if key == "agenda":
-                            db_key = "currentAgenda"
-                        elif key == "overview_diagram":
-                            db_key = "overviewDiagram"
-                        db.reference(f"{session_data_path}/{db_key}").set(value)
+                    if value is None:
+                        continue
+                    # Issue #131: overviewDiagrams は agent が返した「差分のみ」を
+                    # topicId をキーに per-topic で書き込む (P0 fix: stale overwrite 防止)
+                    if key == "overviewDiagrams":
+                        wrote_any = False
+                        if isinstance(value, list):
+                            for entry in value:
+                                if not isinstance(entry, dict):
+                                    continue
+                                topic_id = entry.get("topicId")
+                                if not topic_id:
+                                    continue
+                                db.reference(
+                                    f"{session_data_path}/overviewDiagrams/{topic_id}"
+                                ).set(entry)
+                                wrote_any = True
+                            # 1 件以上の書き込みが成功した時のみ旧 overviewDiagram (単数) を削除。
+                            # no-op (検証失敗 / closing missing) では legacy を保持する。
+                            if wrote_any:
+                                try:
+                                    db.reference(
+                                        f"{session_data_path}/overviewDiagram"
+                                    ).delete()
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to delete legacy overviewDiagram key: {e}"
+                                    )
+                        continue
+                    db_key = key
+                    if key == "agenda":
+                        db_key = "currentAgenda"
+                    elif key == "overview_diagram":
+                        db_key = "overviewDiagram"
+                    db.reference(f"{session_data_path}/{db_key}").set(value)
 
             results_dict[agent_name] = {
                 "data": updated_data_from_agent, "message": user_message_text}
@@ -975,6 +1014,127 @@ async def process_single_agent(
     except Exception as e:
         logger.error(f"Error processing {agent_name}: {e}", exc_info=True)
         results_dict[agent_name] = {"error": str(e)}
+
+
+# Issue #131 P1 fix #4: 議題遷移の closing update は同じ (session, topic) で同時に
+# 複数走らないようにする。dispatcher 由来の hook が短時間に複数発火しても DB の
+# stale overwrite や LLM コストの重複を防ぐ。
+_closing_update_in_flight: set[Tuple[str, str]] = set()
+_closing_update_lock = asyncio.Lock()
+
+
+async def _trigger_overview_closing_update(
+    task_payload: TaskPayload,
+    old_main_topic: str,
+    agent_model: str,
+    agent_key: str,
+) -> None:
+    """議題遷移後、旧 mainTopic の概要図を closing snapshot として更新する (Issue #131)。
+
+    process_single_agent を再利用してデータ取得・LLM 呼び出し・Firebase 書き込み
+    までを一貫して行う。失敗時は warning ログだけ残して落ちる (本流の応答には影響しない)。
+    同一 (session, topic) の重複起動は in-flight set でスキップする。
+    """
+    topic_id_slug = slugify_topic_id(old_main_topic) or old_main_topic
+    session_key = task_payload.sessionId or "_global"
+    inflight_key = (session_key, topic_id_slug)
+
+    async with _closing_update_lock:
+        if inflight_key in _closing_update_in_flight:
+            logger.info(
+                f"[#131] Skipping duplicate closing update: session={session_key} topic={topic_id_slug}"
+            )
+            return
+        _closing_update_in_flight.add(inflight_key)
+
+    instruction = (
+        f"議題が新しいトピックへ移行しました。これまで議論されていた論点 "
+        f"'{old_main_topic}' の概要図を、議論の最終形としてまとめてください。"
+    )
+    results_holder: Dict[str, Any] = {}
+    try:
+        await process_single_agent(
+            overview_diagram_agent,
+            task_payload,
+            "OverviewDiagramAgent",
+            instruction,
+            results_holder,
+            [],  # closing update は会話履歴を必要としない
+            model_name=agent_model,
+            api_key=agent_key,
+            agent_kwargs={
+                "target_topic_id": topic_id_slug,
+                "closing_update": True,
+            },
+        )
+        logger.info(
+            f"[#131] Closing update fired for topic='{old_main_topic}' (slug={topic_id_slug})"
+        )
+    except Exception as e:
+        logger.warning(
+            f"[#131] Closing update failed for topic='{old_main_topic}': {e}",
+            exc_info=True,
+        )
+    finally:
+        async with _closing_update_lock:
+            _closing_update_in_flight.discard(inflight_key)
+
+
+def detect_agenda_topic_change(
+    old_session_data: Optional[Dict[str, Any]],
+    agenda_result: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """AgendaManagementAgent 実行前後の mainTopic を比較する純粋関数 (Issue #131)。
+
+    Returns:
+        (old_main_topic, new_main_topic): 変化が無い / 旧 mainTopic 不在 (= 初回設定) の場合は (None, None)。
+    """
+    if not old_session_data or not agenda_result:
+        return None, None
+    updated_data = agenda_result.get("data") if isinstance(agenda_result, dict) else None
+    if not isinstance(updated_data, dict):
+        return None, None
+    new_agenda = updated_data.get("currentAgenda")
+    if not isinstance(new_agenda, dict):
+        return None, None
+    new_main = (new_agenda.get("mainTopic") or "").strip()
+    old_agenda = old_session_data.get("currentAgenda")
+    old_main = ""
+    if isinstance(old_agenda, dict):
+        old_main = (old_agenda.get("mainTopic") or "").strip()
+    if not old_main or old_main == new_main:
+        return None, None
+    return old_main, new_main
+
+
+def _schedule_overview_closing_update_if_agenda_changed(
+    task_payload: TaskPayload,
+    old_session_data: Dict[str, Any],
+    agenda_result: Optional[Dict[str, Any]],
+    agent_models: Dict[str, str],
+    api_keys: Dict[str, str],
+    default_model: str,
+) -> None:
+    """AgendaManagementAgent の結果を見て mainTopic 変化を検知し、closing update を fire-and-forget で開始する。"""
+    old_main, new_main = detect_agenda_topic_change(old_session_data, agenda_result)
+    if not old_main:
+        return
+
+    od_model = agent_models.get("OverviewDiagramAgent", default_model)
+    od_provider = detect_provider(od_model)
+    od_key = api_keys.get(od_provider)
+    if not od_key:
+        logger.warning(
+            f"[#131] Cannot fire closing update: no API key for OverviewDiagramAgent (provider={od_provider})"
+        )
+        return
+
+    asyncio.create_task(
+        _trigger_overview_closing_update(task_payload, old_main, od_model, od_key)
+    )
+    logger.info(
+        f"[#131] Scheduled overview closing update: old='{old_main}' new='{new_main}'"
+    )
 
 
 async def orchestrate_agents(
@@ -1104,7 +1264,10 @@ async def orchestrate_agents(
 - **TaskManagementAgent**: 会議中のタスク（TODO、進行中、完了）の追加、更新、削除、担当者や期限の設定など、タスクリストの管理を行います。
 - **NotesGeneratorAgent**: 会議中の重要なメモ、決定事項、課題などを記録・要約し、ノートリストを生成・更新します。
 - **AgendaManagementAgent**: 会議の主要議題や詳細、次に議論すべき推奨議題を管理・更新します。
-- **OverviewDiagramAgent**: 会議の内容やプロジェクトの構造を視覚的に表現するMermaid.jsの概要図を生成・更新します。
+- **OverviewDiagramAgent**: 論点 (topic) 単位の概要図 (Mermaid.js) を生成・更新します。
+  - 通常: 現在の議題 (currentAgenda.mainTopic) の図を更新 → `target_topic_id` 省略
+  - 特定論点を指す指示 (例: "Xの論点の図を補足") の場合: その topicId を `target_topic_id` に指定
+  - 「全部の図を更新」「全ての論点を最新化」など網羅的指示の場合: `target_topic_id="*"` を指定
 
 応答形式の厳守のお願い:
 応答は必ず以下のJSON形式のリストとしてください。
@@ -1116,6 +1279,7 @@ async def orchestrate_agents(
 - `instruction` には、そのエージェントに実行させたい具体的な指示を、簡潔な日本語の文字列で記述してください。
 - 複数のエージェントを呼び出す必要がある場合は、リスト内に複数のオブジェクトを含めてください。
 - 呼び出すべき適切なエージェントが存在しない場合は、空のリスト `[]` を返してください。
+- **OverviewDiagramAgent のみ**: 必要に応じて `"target_topic_id"` フィールドを追加できます (例: `{{"agent_name": "OverviewDiagramAgent", "instruction": "...", "target_topic_id": "topic_xxx"}}`、または `"*"` で全更新)。省略時は現在の論点を更新します。
 
 現在のセッションデータ:
 ```json
@@ -1211,6 +1375,23 @@ async def orchestrate_agents(
             logger.info(
                 f"Scheduling agent: {agent_name} with model={agent_model}, instruction: '{instruction}'")
             agent_instructions_map[agent_name] = instruction
+
+            # Issue #131: OverviewDiagramAgent は dispatcher 由来の target_topic_id を kwargs で受け取る
+            # P0 fix: LLM 由来の値は Firebase path injection (/, ., #, [, ], $) を防ぐため
+            # サーバー側で sanitize_target_topic_id を通す ("*" / safe ID はそのまま、
+            # unsafe なら slugify。P1 fix #6 で round-trip 性を保つ)。
+            extra_kwargs: Dict[str, Any] = {}
+            if agent_name == "OverviewDiagramAgent":
+                raw_target = action.get("target_topic_id")
+                if raw_target is not None:
+                    sanitized = sanitize_target_topic_id(raw_target)
+                    if sanitized:
+                        extra_kwargs["target_topic_id"] = sanitized
+                    else:
+                        logger.warning(
+                            f"[#131] Discarded invalid target_topic_id from dispatcher: {raw_target!r}"
+                        )
+
             inner_coro = process_single_agent(
                 agent_instance,
                 task_payload,
@@ -1220,6 +1401,7 @@ async def orchestrate_agents(
                 llm_transcript_messages,
                 model_name=agent_model,
                 api_key=agent_key,
+                agent_kwargs=extra_kwargs or None,
             )
             task = asyncio.create_task(
                 _run_agent_with_progress(agent_name, inner_coro)
@@ -1233,6 +1415,17 @@ async def orchestrate_agents(
 
     if agent_tasks:
         await asyncio.gather(*agent_tasks)
+
+    # Issue #131: agenda 遷移検知 → 旧 mainTopic の closing update を非同期発火
+    if "AgendaManagementAgent" in active_agent_names and session_data:
+        _schedule_overview_closing_update_if_agenda_changed(
+            task_payload=task_payload,
+            old_session_data=session_data,
+            agenda_result=results_from_agents.get("AgendaManagementAgent"),
+            agent_models=agent_models,
+            api_keys=api_keys,
+            default_model=default_model,
+        )
 
     # エージェントへの指示をトランスクリプトに追記
     session_data_path = get_session_data_path(task_payload.roomId, task_payload.sessionId)
@@ -1274,6 +1467,25 @@ async def orchestrate_agents(
     session_data_after = db.reference(session_data_path).get() or {}
     participants_after = db.reference(f"{room_ref_path}/participants").get() or {}
 
+    # Issue #131: 新スキーマ overviewDiagrams を整形 + 旧 1 件互換用に active 1 件抜粋
+    od_diagrams_normalized: Optional[List[Dict[str, Any]]] = None
+    od_legacy_compat: Optional[Dict[str, Any]] = session_data_after.get("overviewDiagram")
+    raw_od = session_data_after.get("overviewDiagrams")
+    if isinstance(raw_od, dict):
+        items = [v for v in raw_od.values() if isinstance(v, dict)]
+        items.sort(key=lambda e: e.get("createdAt", ""))
+        od_diagrams_normalized = items
+    elif isinstance(raw_od, list):
+        od_diagrams_normalized = [d for d in raw_od if isinstance(d, dict)]
+    if od_diagrams_normalized and not od_legacy_compat:
+        # 旧形式互換: active 優先、無ければ末尾の 1 件を title+mermaidDefinition 形式に変換
+        active_entries = [d for d in od_diagrams_normalized if d.get("status") != "closed"]
+        pick = active_entries[-1] if active_entries else od_diagrams_normalized[-1]
+        od_legacy_compat = {
+            "title": pick.get("title", "概要図"),
+            "mermaidDefinition": pick.get("mermaidDefinition", ""),
+        }
+
     final_result = AgentResult(
         invokedAgents=active_agent_names,
         updatedParticipants=list(participants_after.values()) if participants_after else None,
@@ -1282,7 +1494,8 @@ async def orchestrate_agents(
         updatedNotes=list(session_data_after.get(
             "notes", {}).values()) if session_data_after.get("notes") else None,
         updatedAgenda=session_data_after.get("currentAgenda"),
-        updatedOverviewDiagram=session_data_after.get("overviewDiagram")
+        updatedOverviewDiagram=od_legacy_compat,
+        updatedOverviewDiagrams=od_diagrams_normalized,
     )
     return final_result
 

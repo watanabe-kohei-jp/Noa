@@ -80,7 +80,10 @@ const ExportDialog: React.FC<ExportDialogProps> = ({ isOpen, onClose, currentThe
             <li>タスク: {reportData.tasks.length} 件</li>
             <li>ノート: {reportData.notes.length} 件</li>
             <li>カレンダーリンク: {reportData.calendarLinks.length} 件</li>
-            <li>概要図: {reportData.overviewDiagram ? 'あり' : 'なし'}</li>
+            <li>概要図: {(() => {
+              const n = (reportData.overviewDiagrams?.length) ?? (reportData.overviewDiagram ? 1 : 0);
+              return n > 0 ? `${n} 件` : 'なし';
+            })()}</li>
             <li>議題: {reportData.currentAgenda?.mainTopic ? 'あり' : 'なし'}</li>
           </ul>
         </div>
