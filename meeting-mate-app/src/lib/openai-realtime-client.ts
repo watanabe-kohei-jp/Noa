@@ -3,15 +3,20 @@
 // GenAILiveClient (genai-live-client.ts) の代替。ブラウザ WebRTC で OpenAI Realtime に接続する。
 // 音声は WebRTC track で送受信 (Opus)。出力は <audio> 要素で自動再生するため、Gemini 経路の
 // AudioStreamer/AudioRecorder/worklet は使わない (16kHz 資産は Gemini 専用として温存)。
-// イベント名は可能な範囲で GenAILiveClient に寄せる (open/close/error/interrupted/toolcall/turncomplete)。
 //
 // 接続フロー (developers.openai.com/api/docs/guides/realtime-webrtc):
-//  1. サーバー /api/realtime/token で ephemeral client secret (ek_) を取得
-//  2. RTCPeerConnection 作成、マイク track を addTrack、data channel "oai-events" 作成
-//  3. createOffer → setLocalDescription → POST /v1/realtime/calls (SDP, Bearer ek_) → answer
-//  4. data channel open で session.update を送信 → session.created/updated で open 発火
+//  1. マイクを先に取得 (許可ダイアログ待ちで ephemeral token の TTL を消費しないため)
+//  2. サーバー /api/realtime/token で ephemeral client secret (ek_) を取得
+//  3. RTCPeerConnection 作成、マイク track を addTrack、data channel "oai-events" 作成
+//  4. createOffer → setLocalDescription → POST /v1/realtime/calls (SDP, Bearer ek_) → answer
+//  5. data channel open で session.update を送信 → session.updated で open 発火
 //
-// ⚠️ session.update / イベント名の GA スキーマは実測で最終調整する (Step 1 検証)。
+// GPT-5.6 Sol レビュー反映:
+//  - idle scheduler: tool result の function_call_output+response.create を idle まで保留し競合回避
+//  - connect 全体を try/catch し失敗時 cleanup (マイク残り/再接続不能を防止)
+//  - open は session.updated のみ (session.update の成功を確認。設定エラーを見逃さない)
+//  - arguments の JSON/型を検証してから toolcall emit
+//  - /v1/realtime/calls の ?model= は不要 (ephemeral secret に model が束縛される)
 
 import { EventEmitter } from "eventemitter3";
 import { authFetch } from "./api-client";
@@ -53,6 +58,8 @@ export interface OpenAIRealtimeEventTypes {
   /** 出力音声の書き起こし。final=true が確定 (response.output_audio_transcript.done) */
   transcript: (text: string, final: boolean) => void;
   turncomplete: () => void;
+  /** 計測: ユーザー発話終了 → 最初の出力までの時間 (TTFT 目安) */
+  metrics: (m: { ttftMs: number }) => void;
 }
 
 type ServerEvent = { type?: string; [k: string]: unknown };
@@ -67,6 +74,16 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
   private opened = false;
   private transcriptBuf = "";
 
+  // idle scheduler 用の状態 (同時に走れる response は1つ)
+  private hasActiveResponse = false;
+  private audioPlaying = false;
+  private userSpeaking = false;
+  private pendingToolResults: { callId: string; output: string }[] = [];
+
+  // TTFT 計測用
+  private lastSpeechStoppedAt = 0;
+  private awaitingFirstOutput = false;
+
   get status() {
     return this._status;
   }
@@ -76,79 +93,97 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
     this.config = config;
     this._status = "connecting";
     this.opened = false;
-    this.transcriptBuf = "";
+    this.resetSchedulerState();
 
-    // 1. ephemeral token (サーバーが OPENAI_API_KEY で発行。キーはブラウザに出ない)
-    const tokenRes = await authFetch("/api/realtime/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        room_id: config.roomId,
-        session_id: config.sessionId ?? null,
-        model: config.model ?? DEFAULT_MODEL,
-      }),
-    });
-    if (!tokenRes.ok) {
-      this._status = "disconnected";
-      throw new Error(`realtime token failed: ${tokenRes.status} ${await tokenRes.text()}`);
-    }
-    const tokenData = (await tokenRes.json()) as { value?: string };
-    const ek = tokenData.value;
-    if (!ek) {
-      this._status = "disconnected";
-      throw new Error("realtime token: missing 'value'");
-    }
+    try {
+      // 1. マイクを先に取得 (許可ダイアログ待ちで token TTL を消費しない)
+      const stream =
+        config.inputStream ??
+        (this.ownStream = await navigator.mediaDevices.getUserMedia({ audio: true }));
 
-    // 2. peer connection
-    const pc = new RTCPeerConnection();
-    this.pc = pc;
-
-    // 出力音声: WebRTC track を <audio> で自動再生
-    const audioEl = new Audio();
-    audioEl.autoplay = true;
-    this.audioEl = audioEl;
-    pc.ontrack = (e) => {
-      audioEl.srcObject = e.streams[0];
-    };
-
-    // マイク入力 (共有 stream 優先。無ければ自前取得)
-    const stream =
-      config.inputStream ??
-      (this.ownStream = await navigator.mediaDevices.getUserMedia({ audio: true }));
-    stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
-
-    // data channel (イベント送受信)
-    const dc = pc.createDataChannel("oai-events");
-    this.dc = dc;
-    dc.addEventListener("message", (e) => this.handleServerEvent(e.data as string));
-    dc.addEventListener("open", () => this.sendSessionUpdate());
-
-    pc.addEventListener("connectionstatechange", () => {
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-        if (this._status !== "disconnected") {
-          this._status = "disconnected";
-          this.emit("close");
-        }
+      // 2. ephemeral token (サーバーが OPENAI_API_KEY で発行。キーはブラウザに出ない)
+      const tokenRes = await authFetch("/api/realtime/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room_id: config.roomId,
+          session_id: config.sessionId ?? null,
+          model: config.model ?? DEFAULT_MODEL,
+        }),
+      });
+      if (!tokenRes.ok) {
+        throw new Error(`realtime token failed: ${tokenRes.status} ${await tokenRes.text()}`);
       }
-    });
+      const tokenData = (await tokenRes.json()) as { value?: string };
+      const ek = tokenData.value;
+      if (!ek) throw new Error("realtime token: missing 'value'");
 
-    // 3. SDP offer/answer (ephemeral token で認証)
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+      // 3. peer connection
+      const pc = new RTCPeerConnection();
+      this.pc = pc;
 
-    const model = config.model ?? DEFAULT_MODEL;
-    const sdpRes = await fetch(`${OPENAI_CALLS_URL}?model=${encodeURIComponent(model)}`, {
-      method: "POST",
-      body: offer.sdp,
-      headers: { Authorization: `Bearer ${ek}`, "Content-Type": "application/sdp" },
-    });
-    if (!sdpRes.ok) {
-      this._status = "disconnected";
-      throw new Error(`realtime SDP exchange failed: ${sdpRes.status} ${await sdpRes.text()}`);
+      const audioEl = new Audio();
+      audioEl.autoplay = true;
+      this.audioEl = audioEl;
+      pc.ontrack = (e) => {
+        audioEl.srcObject = e.streams[0];
+      };
+
+      stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+
+      const dc = pc.createDataChannel("oai-events");
+      this.dc = dc;
+      dc.addEventListener("message", (e) => this.handleServerEvent(e.data as string));
+      dc.addEventListener("open", () => this.sendSessionUpdate());
+      dc.addEventListener("close", () => this.handleTransportClosed());
+      dc.addEventListener("error", () => this.handleTransportClosed());
+
+      pc.addEventListener("connectionstatechange", () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+          this.handleTransportClosed();
+        }
+      });
+
+      // 4. SDP offer/answer (ephemeral token で認証。?model= は不要 = ek に model 束縛)
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const sdpRes = await fetch(OPENAI_CALLS_URL, {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          Authorization: `Bearer ${ek}`,
+          "Content-Type": "application/sdp",
+          Accept: "application/sdp",
+        },
+      });
+      if (!sdpRes.ok) {
+        throw new Error(`realtime SDP exchange failed: ${sdpRes.status} ${await sdpRes.text()}`);
+      }
+      const answerSdp = await sdpRes.text();
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      // open は session.updated 受信後に emit する
+    } catch (e) {
+      // 失敗時は必ず cleanup (マイク残り / _status="connecting" 固着による再接続不能を防ぐ)
+      this.disconnect();
+      throw e;
     }
-    const answerSdp = await sdpRes.text();
-    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-    // open は session.created/updated 受信後に emit する
+  }
+
+  private resetSchedulerState(): void {
+    this.transcriptBuf = "";
+    this.hasActiveResponse = false;
+    this.audioPlaying = false;
+    this.userSpeaking = false;
+    this.pendingToolResults = [];
+    this.lastSpeechStoppedAt = 0;
+    this.awaitingFirstOutput = false;
+  }
+
+  private handleTransportClosed(): void {
+    if (this._status !== "disconnected") {
+      this._status = "disconnected";
+      this.emit("close");
+    }
   }
 
   private sendEvent(obj: Record<string, unknown>): void {
@@ -167,7 +202,7 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
         output_modalities: ["audio"],
         audio: {
           input: {
-            // server VAD に委譲 (Codex 指摘: client VAD の gate / 16kHz 時間定数問題を回避)
+            // server VAD に委譲 (Codex: client VAD の gate / 16kHz 時間定数問題を回避)
             turn_detection: {
               type: "server_vad",
               create_response: true,
@@ -175,6 +210,7 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
             },
           },
           output: { voice: c.voice ?? DEFAULT_VOICE },
+          // WebRTC では format は Opus を SDP でネゴシエートするため省略 (Codex 確認)
         },
         tools: c.tools.map((t) => ({
           type: "function",
@@ -194,16 +230,54 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
       return;
     }
     switch (evt.type) {
-      case "session.created":
       case "session.updated":
+        // session.update の成功確認。初回のみ open (session.created では発火しない)
         if (!this.opened) {
           this.opened = true;
           this._status = "connected";
           this.emit("open");
         }
         break;
+
+      case "response.created":
+        this.hasActiveResponse = true;
+        break;
+      case "response.done": {
+        this.hasActiveResponse = false;
+        const status = (evt.response as { status?: string } | undefined)?.status;
+        if (status && status !== "completed") {
+          this.emit("error", { where: "response.done", status, detail: evt.response });
+        }
+        this.emit("turncomplete");
+        this.flushToolResults();
+        break;
+      }
+
+      case "output_audio_buffer.started":
+        this.audioPlaying = true;
+        this.markFirstOutput();
+        break;
+      case "output_audio_buffer.stopped":
+      case "output_audio_buffer.cleared":
+        this.audioPlaying = false;
+        this.flushToolResults();
+        break;
+
+      case "input_audio_buffer.speech_started":
+        this.userSpeaking = true;
+        // 実際の barge-in は active response / 再生中のときだけ
+        if (this.hasActiveResponse || this.audioPlaying) this.emit("interrupted");
+        break;
+      case "input_audio_buffer.speech_stopped":
+        this.userSpeaking = false;
+        this.lastSpeechStoppedAt = Date.now();
+        this.awaitingFirstOutput = true;
+        this.flushToolResults();
+        break;
+
       case "response.output_audio_transcript.delta":
         if (typeof evt.delta === "string") {
+          this.markFirstOutput();
           this.transcriptBuf += evt.delta;
           this.emit("transcript", evt.delta, false);
         }
@@ -212,27 +286,28 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
         this.emit("transcript", (evt.transcript as string) ?? this.transcriptBuf, true);
         this.transcriptBuf = "";
         break;
-      case "input_audio_buffer.speech_started":
-        // ユーザー発話開始 = 割り込み
-        this.emit("interrupted");
-        break;
+
       case "response.function_call_arguments.done": {
-        let args: Record<string, unknown> = {};
-        try {
-          args = evt.arguments ? (JSON.parse(evt.arguments as string) as Record<string, unknown>) : {};
-        } catch {
-          args = {};
+        const callId = evt.call_id;
+        const name = evt.name;
+        if (typeof callId !== "string" || typeof name !== "string") {
+          console.warn("[openai-realtime] FC done without call_id/name", evt);
+          break;
         }
-        this.emit("toolcall", {
-          callId: evt.call_id as string,
-          name: evt.name as string,
-          args,
-        });
+        // 中断/不完全時は arguments が不正なことがある → 実行しない
+        let args: Record<string, unknown>;
+        try {
+          const parsed = JSON.parse((evt.arguments as string) ?? "{}");
+          if (typeof parsed !== "object" || parsed === null) throw new Error("not object");
+          args = parsed as Record<string, unknown>;
+        } catch {
+          console.warn("[openai-realtime] FC args parse failed, skipping", evt.arguments);
+          break;
+        }
+        this.emit("toolcall", { callId, name, args });
         break;
       }
-      case "response.done":
-        this.emit("turncomplete");
-        break;
+
       case "error":
         this.emit("error", evt.error ?? evt);
         break;
@@ -241,20 +316,34 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
     }
   }
 
+  private markFirstOutput(): void {
+    if (this.awaitingFirstOutput && this.lastSpeechStoppedAt > 0) {
+      this.awaitingFirstOutput = false;
+      this.emit("metrics", { ttftMs: Date.now() - this.lastSpeechStoppedAt });
+    }
+  }
+
   /**
-   * FC 結果を返す。
-   * Step 1: 同期1回 (function_call_output + response.create)。
-   * Step 2 で response scheduler により willContinue/scheduling(INTERRUPT/WHEN_IDLE) を吸収する。
+   * FC 結果を返す。idle (ユーザー無発話・response 非生成・音声非再生) になるまで保留し、
+   * function_call_output + response.create をまとめて送る (Codex: response.create の競合回避)。
+   * これにより「非同期FC が会話を止めない」ことを、単なる active-response 競合と区別して検証できる。
    */
   sendToolResult(callId: string, output: unknown): void {
-    this.sendEvent({
-      type: "conversation.item.create",
-      item: {
-        type: "function_call_output",
-        call_id: callId,
-        output: typeof output === "string" ? output : JSON.stringify(output),
-      },
-    });
+    const outStr = typeof output === "string" ? output : JSON.stringify(output ?? {});
+    this.pendingToolResults.push({ callId, output: outStr });
+    this.flushToolResults();
+  }
+
+  private flushToolResults(): void {
+    if (this.pendingToolResults.length === 0) return;
+    if (this.userSpeaking || this.hasActiveResponse || this.audioPlaying) return; // idle 待ち
+    for (const r of this.pendingToolResults) {
+      this.sendEvent({
+        type: "conversation.item.create",
+        item: { type: "function_call_output", call_id: r.callId, output: r.output },
+      });
+    }
+    this.pendingToolResults = [];
     this.sendEvent({ type: "response.create" });
   }
 
@@ -289,5 +378,6 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
     this.pc = null;
     this._status = "disconnected";
     this.opened = false;
+    this.resetSchedulerState();
   }
 }

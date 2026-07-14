@@ -93,7 +93,7 @@ async def create_realtime_token(
     )
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.post(
                 OPENAI_CLIENT_SECRETS_URL,
                 headers={
