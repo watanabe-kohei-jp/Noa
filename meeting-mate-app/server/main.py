@@ -11,6 +11,7 @@ from deep_analysis import route_and_analyze
 from brain import process_brain_request, process_proactive_check
 from vision_analyzer import analyze_vision
 from media_api import router as media_router
+from realtime_api import router as realtime_router
 from agents.task_agent import TaskManagementAgent
 from agents.participant_agent import ParticipantManagementAgent
 from agents.overview_diagram_agent import OverviewDiagramAgent
@@ -305,6 +306,7 @@ async def log_request_metrics(request, call_next):
 
 
 app.include_router(media_router)
+app.include_router(realtime_router)
 
 agenda_agent = AgendaManagementAgent(config_path=os.path.join(
     AGENT_CONFIG_DIR, "agenda_agent_config.json"))
