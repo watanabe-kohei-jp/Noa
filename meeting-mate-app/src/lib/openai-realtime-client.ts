@@ -124,9 +124,15 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
 
       const audioEl = new Audio();
       audioEl.autoplay = true;
+      // detached な Audio 要素は autoplay policy でブロックされることがあるため DOM に追加
+      audioEl.style.display = "none";
+      if (typeof document !== "undefined") document.body.appendChild(audioEl);
       this.audioEl = audioEl;
       pc.ontrack = (e) => {
         audioEl.srcObject = e.streams[0];
+        void audioEl.play().catch((err) =>
+          console.warn("[openai-realtime] audio play() blocked:", err)
+        );
       };
 
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
@@ -245,7 +251,8 @@ export class OpenAIRealtimeClient extends EventEmitter<OpenAIRealtimeEventTypes>
       case "response.done": {
         this.hasActiveResponse = false;
         const status = (evt.response as { status?: string } | undefined)?.status;
-        if (status && status !== "completed") {
+        // cancelled は barge-in (interrupt_response) による正常な中断 → error 扱いしない
+        if (status && status !== "completed" && status !== "cancelled") {
           this.emit("error", { where: "response.done", status, detail: evt.response });
         }
         this.emit("turncomplete");
