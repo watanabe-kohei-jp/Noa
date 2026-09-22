@@ -309,9 +309,6 @@ function LivePanelInner({
 
   // Accumulate model text across spoken turns until the interaction is idle.
   const currentModelTextRef = useRef<string>("");
-  // interactionStatus は SDK 2.17+ の新シグナル。送ってこないモデル（2.5 native audio 等）
-  // では従来どおり turncomplete で確定させるため、受信有無を覚えておく。
-  const sawInteractionStatusRef = useRef(false);
 
   // Configure tool handler with room context + session state
   useEffect(() => {
@@ -436,25 +433,42 @@ function LivePanelInner({
       }
     };
 
+    // 文字起こしの確定タイミング:
+    //   interactionStatus は turnComplete と同じメッセージで直後に emit される。
+    //   実測では gemini-3.8-live / 2.5 native audio とも interactionStatus を送ってこないため、
+    //   turnComplete で確定する必要がある。一方、裏で非同期ツール実行や推論が続いている場合は
+    //   IN_PROGRESS が来るので、その時だけ確定を IDLE まで遅らせる。
+    //   そのため turnComplete では一拍置いてから確定し、同じメッセージの
+    //   interactionStatus に取り消す機会を与える。
+    let pendingFinalize: ReturnType<typeof setTimeout> | null = null;
+
+    const cancelPendingFinalize = () => {
+      if (pendingFinalize !== null) {
+        clearTimeout(pendingFinalize);
+        pendingFinalize = null;
+      }
+    };
+
     const finalizeModelText = () => {
+      cancelPendingFinalize();
       if (currentModelTextRef.current.trim()) {
         syncTranscriptToFirebase(currentModelTextRef.current, "ai");
       }
       currentModelTextRef.current = "";
     };
 
-    const onInteractionStatus = (status: InteractionStatus) => {
-      sawInteractionStatusRef.current = true;
-      // A spoken turn can end while an async tool call is still being processed.
-      if (status !== InteractionStatus.IDLE) return;
-      finalizeModelText();
+    const onTurnComplete = () => {
+      cancelPendingFinalize();
+      pendingFinalize = setTimeout(finalizeModelText, 0);
     };
 
-    // interactionStatus を送らないモデル向けのフォールバック。
-    // 送ってくるモデルでは onInteractionStatus 側で確定させるため何もしない。
-    const onTurnComplete = () => {
-      if (sawInteractionStatusRef.current) return;
-      finalizeModelText();
+    const onInteractionStatus = (status: InteractionStatus) => {
+      if (status === InteractionStatus.IDLE) {
+        finalizeModelText();
+        return;
+      }
+      // 裏で処理が続いている間は確定しない（IDLE を待つ）
+      cancelPendingFinalize();
     };
 
     const onToolCall = (toolCall: LiveServerToolCall) => {
@@ -472,6 +486,7 @@ function LivePanelInner({
     client.on("toolcallcancellation", onToolCallCancellation);
 
     return () => {
+      cancelPendingFinalize();
       client.off("content", onContent);
       client.off("interactionstatus", onInteractionStatus);
       client.off("turncomplete", onTurnComplete);
