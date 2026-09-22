@@ -7,6 +7,7 @@ import { AudioStreamer } from "../lib/audio-streamer";
 import { audioContext } from "../lib/audio-utils";
 import VolMeterWorklet from "../lib/worklets/vol-meter";
 import { LiveConnectConfig, LiveServerSessionResumptionUpdate } from "@google/genai";
+import { DEFAULT_LIVE_MODEL_ID } from "../constants/live-models";
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 1000;
@@ -29,7 +30,7 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
   const audioStreamerRef = useRef<AudioStreamer | null>(null);
 
   const [model, setModel] = useState<string>(
-    "models/gemini-2.5-flash-native-audio-preview-12-2025"
+    DEFAULT_LIVE_MODEL_ID
   );
   const [config, _setConfig] = useState<LiveConnectConfig>({});
   const configRef = useRef<LiveConnectConfig>(config);

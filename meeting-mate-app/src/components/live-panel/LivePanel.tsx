@@ -26,7 +26,7 @@ import type { SessionData, TranscriptEntry, TodoItem, Notes } from "../../types/
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
 import { authFetch } from "../../lib/api-client";
-import { Modality } from "@google/genai";
+import { InteractionStatus, Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
 import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
 import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
@@ -307,8 +307,11 @@ function LivePanelInner({
     onReady?.({ sendText });
   }, [onReady, sendText]);
 
-  // Accumulate current model turn text (no UI state needed)
+  // Accumulate model text across spoken turns until the interaction is idle.
   const currentModelTextRef = useRef<string>("");
+  // interactionStatus は SDK 2.17+ の新シグナル。送ってこないモデル（2.5 native audio 等）
+  // では従来どおり turncomplete で確定させるため、受信有無を覚えておく。
+  const sawInteractionStatusRef = useRef(false);
 
   // Configure tool handler with room context + session state
   useEffect(() => {
@@ -433,11 +436,25 @@ function LivePanelInner({
       }
     };
 
-    const onTurnComplete = () => {
+    const finalizeModelText = () => {
       if (currentModelTextRef.current.trim()) {
         syncTranscriptToFirebase(currentModelTextRef.current, "ai");
       }
       currentModelTextRef.current = "";
+    };
+
+    const onInteractionStatus = (status: InteractionStatus) => {
+      sawInteractionStatusRef.current = true;
+      // A spoken turn can end while an async tool call is still being processed.
+      if (status !== InteractionStatus.IDLE) return;
+      finalizeModelText();
+    };
+
+    // interactionStatus を送らないモデル向けのフォールバック。
+    // 送ってくるモデルでは onInteractionStatus 側で確定させるため何もしない。
+    const onTurnComplete = () => {
+      if (sawInteractionStatusRef.current) return;
+      finalizeModelText();
     };
 
     const onToolCall = (toolCall: LiveServerToolCall) => {
@@ -449,12 +466,14 @@ function LivePanelInner({
     };
 
     client.on("content", onContent);
+    client.on("interactionstatus", onInteractionStatus);
     client.on("turncomplete", onTurnComplete);
     client.on("toolcall", onToolCall);
     client.on("toolcallcancellation", onToolCallCancellation);
 
     return () => {
       client.off("content", onContent);
+      client.off("interactionstatus", onInteractionStatus);
       client.off("turncomplete", onTurnComplete);
       client.off("toolcall", onToolCall);
       client.off("toolcallcancellation", onToolCallCancellation);

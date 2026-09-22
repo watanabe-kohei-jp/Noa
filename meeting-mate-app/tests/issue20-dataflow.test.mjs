@@ -1,21 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+// vitest 4 は登録されたテストが無いファイルを "No test suite found" で失敗させるため、
+// 自前の run() ヘルパーではなく it() に登録する。
+import { it as run } from 'vitest';
 
 const repoRoot = process.cwd();
 
 function read(relativePath) {
   return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
-}
-
-function run(name, fn) {
-  try {
-    fn();
-    console.log(`PASS ${name}`);
-  } catch (error) {
-    console.error(`FAIL ${name}`);
-    throw error;
-  }
 }
 
 run('brain extract_actions exposes mermaid_code and title for generate_diagram', () => {
