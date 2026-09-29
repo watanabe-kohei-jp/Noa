@@ -25,8 +25,9 @@ import type { ConnectionState, LiveMode, LivePanelAPI } from "../../types/live-a
 import type { SessionData, TranscriptEntry, TodoItem, Notes } from "../../types/data";
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
+import { createTranscriptFinalizer } from "../../lib/transcript-finalizer";
 import { authFetch } from "../../lib/api-client";
-import { InteractionStatus, Modality } from "@google/genai";
+import { Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
 import { ThinkingQueueProvider, useThinkingQueue } from "../../contexts/ThinkingQueueContext";
 import ThinkingQueuePanel from "../thinking-queue/ThinkingQueuePanel";
@@ -307,9 +308,6 @@ function LivePanelInner({
     onReady?.({ sendText });
   }, [onReady, sendText]);
 
-  // Accumulate model text across spoken turns until the interaction is idle.
-  const currentModelTextRef = useRef<string>("");
-
   // Configure tool handler with room context + session state
   useEffect(() => {
     const contextProvider: MeetingContextProvider = {
@@ -423,52 +421,18 @@ function LivePanelInner({
 
   // Listen for content events (headless - no UI messages state)
   useEffect(() => {
+    const finalizer = createTranscriptFinalizer({
+      onFinalize: (text) => syncTranscriptToFirebase(text, "ai"),
+    });
+
     const onContent = (data: { modelTurn?: { parts?: { text?: string }[] } }) => {
       if (data.modelTurn?.parts) {
         for (const part of data.modelTurn.parts) {
           if (part.text) {
-            currentModelTextRef.current += part.text;
+            finalizer.appendText(part.text);
           }
         }
       }
-    };
-
-    // 文字起こしの確定タイミング:
-    //   interactionStatus は turnComplete と同じメッセージで直後に emit される。
-    //   実測では gemini-3.8-live / 2.5 native audio とも interactionStatus を送ってこないため、
-    //   turnComplete で確定する必要がある。一方、裏で非同期ツール実行や推論が続いている場合は
-    //   IN_PROGRESS が来るので、その時だけ確定を IDLE まで遅らせる。
-    //   そのため turnComplete では一拍置いてから確定し、同じメッセージの
-    //   interactionStatus に取り消す機会を与える。
-    let pendingFinalize: ReturnType<typeof setTimeout> | null = null;
-
-    const cancelPendingFinalize = () => {
-      if (pendingFinalize !== null) {
-        clearTimeout(pendingFinalize);
-        pendingFinalize = null;
-      }
-    };
-
-    const finalizeModelText = () => {
-      cancelPendingFinalize();
-      if (currentModelTextRef.current.trim()) {
-        syncTranscriptToFirebase(currentModelTextRef.current, "ai");
-      }
-      currentModelTextRef.current = "";
-    };
-
-    const onTurnComplete = () => {
-      cancelPendingFinalize();
-      pendingFinalize = setTimeout(finalizeModelText, 0);
-    };
-
-    const onInteractionStatus = (status: InteractionStatus) => {
-      if (status === InteractionStatus.IDLE) {
-        finalizeModelText();
-        return;
-      }
-      // 裏で処理が続いている間は確定しない（IDLE を待つ）
-      cancelPendingFinalize();
     };
 
     const onToolCall = (toolCall: LiveServerToolCall) => {
@@ -480,16 +444,16 @@ function LivePanelInner({
     };
 
     client.on("content", onContent);
-    client.on("interactionstatus", onInteractionStatus);
-    client.on("turncomplete", onTurnComplete);
+    client.on("interactionstatus", finalizer.onInteractionStatus);
+    client.on("turncomplete", finalizer.onTurnComplete);
     client.on("toolcall", onToolCall);
     client.on("toolcallcancellation", onToolCallCancellation);
 
     return () => {
-      cancelPendingFinalize();
+      finalizer.dispose();
       client.off("content", onContent);
-      client.off("interactionstatus", onInteractionStatus);
-      client.off("turncomplete", onTurnComplete);
+      client.off("interactionstatus", finalizer.onInteractionStatus);
+      client.off("turncomplete", finalizer.onTurnComplete);
       client.off("toolcall", onToolCall);
       client.off("toolcallcancellation", onToolCallCancellation);
     };
