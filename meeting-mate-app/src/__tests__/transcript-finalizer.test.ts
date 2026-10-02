@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InteractionStatus } from "@google/genai";
+import { EventEmitter } from "eventemitter3";
+import type { LiveClientEventTypes } from "@/lib/genai-live-client";
 import { createTranscriptFinalizer } from "@/lib/transcript-finalizer";
 
 describe("createTranscriptFinalizer", () => {
@@ -80,14 +82,15 @@ describe("createTranscriptFinalizer", () => {
     expect(onFinalize).toHaveBeenCalledExactlyOnceWith("Done.");
   });
 
-  it("flushes to the old callback on dispose before the tick without crossing sessions", () => {
+  it("discards the old session text on dispose before the tick without crossing sessions", () => {
     const saveOldSession = vi.fn();
     const oldFinalizer = createTranscriptFinalizer({ onFinalize: saveOldSession });
     oldFinalizer.appendText("Old session.");
     oldFinalizer.onTurnComplete();
     oldFinalizer.dispose();
 
-    expect(saveOldSession).toHaveBeenCalledExactlyOnceWith("Old session.");
+    expect(saveOldSession).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
 
     const saveNewSession = vi.fn();
     const newFinalizer = createTranscriptFinalizer({ onFinalize: saveNewSession });
@@ -95,11 +98,11 @@ describe("createTranscriptFinalizer", () => {
     newFinalizer.onTurnComplete();
     vi.advanceTimersToNextTimer();
 
-    expect(saveOldSession).toHaveBeenCalledTimes(1);
+    expect(saveOldSession).not.toHaveBeenCalled();
     expect(saveNewSession).toHaveBeenCalledExactlyOnceWith("New session.");
   });
 
-  it("flushes immediately on dispose while waiting in IN_PROGRESS", () => {
+  it("discards text on dispose while waiting in IN_PROGRESS", () => {
     const onFinalize = vi.fn();
     const finalizer = createTranscriptFinalizer({ onFinalize });
     finalizer.appendText("Still processing.");
@@ -109,18 +112,22 @@ describe("createTranscriptFinalizer", () => {
 
     expect(onFinalize).not.toHaveBeenCalled();
     finalizer.dispose();
+    finalizer.onInteractionStatus(InteractionStatus.IDLE);
+    vi.runAllTimers();
 
-    expect(onFinalize).toHaveBeenCalledExactlyOnceWith("Still processing.");
+    expect(onFinalize).not.toHaveBeenCalled();
   });
 
-  it("flushes accumulated text on dispose even without turnComplete", () => {
+  it("discards accumulated text on dispose even without turnComplete", () => {
     const onFinalize = vi.fn();
     const finalizer = createTranscriptFinalizer({ onFinalize });
     finalizer.appendText("Partial utterance.");
     finalizer.dispose();
     finalizer.dispose();
+    finalizer.onInteractionStatus(InteractionStatus.IDLE);
+    vi.runAllTimers();
 
-    expect(onFinalize).toHaveBeenCalledExactlyOnceWith("Partial utterance.");
+    expect(onFinalize).not.toHaveBeenCalled();
   });
 
   it.each(["", " \n\t "])("never saves empty or whitespace text: %j", (text) => {
@@ -143,6 +150,8 @@ describe("createTranscriptFinalizer", () => {
     const schedule = vi.fn((fn: () => void) => setTimeout(fn, 0));
     const finalizer = createTranscriptFinalizer({ onFinalize, schedule, cancel });
     finalizer.appendText("Done.");
+    finalizer.onInteractionStatus(InteractionStatus.IDLE);
+    finalizer.appendText("Discarded.");
     finalizer.onTurnComplete();
     finalizer.dispose();
 
@@ -152,6 +161,58 @@ describe("createTranscriptFinalizer", () => {
     expect(vi.getTimerCount()).toBe(1);
     vi.advanceTimersToNextTimer();
     expect(onFinalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("finalizes after one tick when registered as an EventEmitter turncomplete listener", () => {
+    const onFinalize = vi.fn();
+    const finalizer = createTranscriptFinalizer({ onFinalize });
+    const client = new EventEmitter<LiveClientEventTypes>();
+    client.on("turncomplete", finalizer.onTurnComplete);
+    finalizer.appendText("Hello");
+    client.emit("turncomplete");
+    finalizer.appendText(" world.");
+
+    expect(onFinalize).not.toHaveBeenCalled();
+    vi.advanceTimersToNextTimer();
+
+    expect(onFinalize).toHaveBeenCalledExactlyOnceWith("Hello world.");
+  });
+
+  it("waits for emitted IDLE when finalizer methods are registered as EventEmitter listeners", () => {
+    const onFinalize = vi.fn();
+    const finalizer = createTranscriptFinalizer({ onFinalize });
+    const client = new EventEmitter<LiveClientEventTypes>();
+    client.on("turncomplete", finalizer.onTurnComplete);
+    client.on("interactionstatus", finalizer.onInteractionStatus);
+    finalizer.appendText("Checking. ");
+    client.emit("turncomplete");
+    client.emit("interactionstatus", InteractionStatus.IN_PROGRESS);
+    vi.runAllTimers();
+
+    expect(onFinalize).not.toHaveBeenCalled();
+    finalizer.appendText("Done.");
+    client.emit("interactionstatus", InteractionStatus.IDLE);
+
+    expect(onFinalize).toHaveBeenCalledExactlyOnceWith("Checking. Done.");
+    vi.runAllTimers();
+    expect(onFinalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("unregisters finalizer methods from the EventEmitter with off", () => {
+    const onFinalize = vi.fn();
+    const finalizer = createTranscriptFinalizer({ onFinalize });
+    const client = new EventEmitter<LiveClientEventTypes>();
+    client.on("turncomplete", finalizer.onTurnComplete);
+    client.on("interactionstatus", finalizer.onInteractionStatus);
+    client.off("turncomplete", finalizer.onTurnComplete);
+    client.off("interactionstatus", finalizer.onInteractionStatus);
+    finalizer.appendText("Unregistered.");
+
+    expect(client.emit("turncomplete")).toBe(false);
+    expect(client.emit("interactionstatus", InteractionStatus.IDLE)).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.runAllTimers();
+    expect(onFinalize).not.toHaveBeenCalled();
   });
 
   it("replaces a pending turnComplete timer and clears text between utterances", () => {

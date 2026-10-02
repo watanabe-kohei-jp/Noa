@@ -58,8 +58,10 @@ export function createTranscriptFinalizer({
     },
 
     dispose(): void {
-      // Flush through this effect's callback before its session or client changes.
-      finalize();
+      // Discard at session boundaries: writing back to a deleted session creates
+      // a ghost session. Interim until Issue #164 moves RTDB writes to the server.
+      cancelPendingFinalize();
+      text = "";
     },
   };
 }
