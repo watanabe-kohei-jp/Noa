@@ -25,6 +25,7 @@ import type { ConnectionState, LiveMode, LivePanelAPI } from "../../types/live-a
 import type { SessionData, TranscriptEntry, TodoItem, Notes } from "../../types/data";
 import { useBrain } from "../../hooks/useBrain";
 import { filterThinkingText } from "../../lib/transcript-filter";
+import { createTranscriptFinalizer } from "../../lib/transcript-finalizer";
 import { authFetch } from "../../lib/api-client";
 import { Modality } from "@google/genai";
 import type { LiveServerToolCall, LiveServerToolCallCancellation, LiveConnectConfig } from "@google/genai";
@@ -307,9 +308,6 @@ function LivePanelInner({
     onReady?.({ sendText });
   }, [onReady, sendText]);
 
-  // Accumulate current model turn text (no UI state needed)
-  const currentModelTextRef = useRef<string>("");
-
   // Configure tool handler with room context + session state
   useEffect(() => {
     const contextProvider: MeetingContextProvider = {
@@ -423,21 +421,18 @@ function LivePanelInner({
 
   // Listen for content events (headless - no UI messages state)
   useEffect(() => {
+    const finalizer = createTranscriptFinalizer({
+      onFinalize: (text) => syncTranscriptToFirebase(text, "ai"),
+    });
+
     const onContent = (data: { modelTurn?: { parts?: { text?: string }[] } }) => {
       if (data.modelTurn?.parts) {
         for (const part of data.modelTurn.parts) {
           if (part.text) {
-            currentModelTextRef.current += part.text;
+            finalizer.appendText(part.text);
           }
         }
       }
-    };
-
-    const onTurnComplete = () => {
-      if (currentModelTextRef.current.trim()) {
-        syncTranscriptToFirebase(currentModelTextRef.current, "ai");
-      }
-      currentModelTextRef.current = "";
     };
 
     const onToolCall = (toolCall: LiveServerToolCall) => {
@@ -449,13 +444,16 @@ function LivePanelInner({
     };
 
     client.on("content", onContent);
-    client.on("turncomplete", onTurnComplete);
+    client.on("interactionstatus", finalizer.onInteractionStatus);
+    client.on("turncomplete", finalizer.onTurnComplete);
     client.on("toolcall", onToolCall);
     client.on("toolcallcancellation", onToolCallCancellation);
 
     return () => {
+      finalizer.dispose();
       client.off("content", onContent);
-      client.off("turncomplete", onTurnComplete);
+      client.off("interactionstatus", finalizer.onInteractionStatus);
+      client.off("turncomplete", finalizer.onTurnComplete);
       client.off("toolcall", onToolCall);
       client.off("toolcallcancellation", onToolCallCancellation);
     };

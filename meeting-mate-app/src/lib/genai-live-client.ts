@@ -2,6 +2,7 @@
 import {
   Content,
   GoogleGenAI,
+  InteractionStatus,
   LiveCallbacks,
   LiveClientToolResponse,
   LiveConnectConfig,
@@ -25,6 +26,7 @@ export interface LiveClientEventTypes {
   content: (data: LiveServerContent) => void;
   error: (error: ErrorEvent) => void;
   interrupted: () => void;
+  interactionstatus: (status: InteractionStatus) => void;
   log: (log: StreamingLog) => void;
   open: () => void;
   setupcomplete: () => void;
@@ -185,6 +187,9 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
       if ("interrupted" in serverContent) {
         this.log("server.content", "interrupted");
         this.emit("interrupted");
+        if (serverContent.interactionStatus != null) {
+          this.emit("interactionstatus", serverContent.interactionStatus);
+        }
         return;
       }
       if ("turnComplete" in serverContent) {
@@ -204,7 +209,7 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
       }
 
       if ("modelTurn" in serverContent) {
-        let parts: Part[] = serverContent.modelTurn?.parts || [];
+        const parts: Part[] = serverContent.modelTurn?.parts || [];
 
         const audioParts = parts.filter(
           (p) => p.inlineData && p.inlineData.mimeType?.startsWith("audio/pcm")
@@ -220,14 +225,17 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
             this.log(`server.audio`, `buffer (${data.byteLength})`);
           }
         });
-        if (!otherParts.length) {
-          return;
+        if (otherParts.length) {
+          const content: { modelTurn: Content } = { modelTurn: { parts: otherParts } };
+          this.emit("content", content);
+          this.log(`server.content`, message);
         }
+      }
 
-        parts = otherParts;
-        const content: { modelTurn: Content } = { modelTurn: { parts } };
-        this.emit("content", content);
-        this.log(`server.content`, message);
+      // Deliver all text before IDLE lets consumers finalize the interaction.
+      // A completed spoken turn can still have background processing in progress.
+      if (serverContent.interactionStatus != null) {
+        this.emit("interactionstatus", serverContent.interactionStatus);
       }
     } else {
       console.log("received unmatched message", message);
